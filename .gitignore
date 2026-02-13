@@ -19,10 +19,11 @@ build/
 *.swo
 .DS_Store
 
-# Data
-data/*.json
+# Data (exclude user-uploaded data, keep project reference data)
 data/*.xlsx
 !data/.gitkeep
+!data/ateco_coefficients.json
+!data/cadastral_codes.json
 
 # Alembic
 alembic/versions/*.py

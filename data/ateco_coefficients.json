@@ -1,0 +1,29 @@
+{
+  "_comment": "ATECO code ranges → forfettario profitability coefficients (coefficienti di redditività). Source: Legge 190/2014, updated by Legge di Bilancio.",
+  "ranges": {
+    "01-03": {"description": "Agricoltura, silvicoltura e pesca", "coefficient": 0.40},
+    "05-09": {"description": "Estrazione di minerali", "coefficient": 0.86},
+    "10-33": {"description": "Attività manifatturiere", "coefficient": 0.86},
+    "35": {"description": "Fornitura energia elettrica, gas", "coefficient": 0.86},
+    "36-39": {"description": "Fornitura acqua, reti fognarie, gestione rifiuti", "coefficient": 0.86},
+    "41-43": {"description": "Costruzioni", "coefficient": 0.86},
+    "45": {"description": "Commercio e riparazione autoveicoli e motocicli", "coefficient": 0.40},
+    "46": {"description": "Commercio all'ingrosso", "coefficient": 0.40},
+    "47": {"description": "Commercio al dettaglio", "coefficient": 0.40},
+    "49-53": {"description": "Trasporto e magazzinaggio", "coefficient": 0.67},
+    "55-56": {"description": "Alloggio e ristorazione", "coefficient": 0.40},
+    "58-63": {"description": "Servizi di informazione e comunicazione", "coefficient": 0.67},
+    "64-66": {"description": "Attività finanziarie e assicurative", "coefficient": 0.78},
+    "68": {"description": "Attività immobiliari", "coefficient": 0.86},
+    "69-75": {"description": "Attività professionali, scientifiche e tecniche", "coefficient": 0.78},
+    "77-82": {"description": "Noleggio, agenzie viaggio, servizi alle imprese", "coefficient": 0.67},
+    "84": {"description": "Amministrazione pubblica e difesa", "coefficient": 0.67},
+    "85": {"description": "Istruzione", "coefficient": 0.78},
+    "86-88": {"description": "Sanità e assistenza sociale", "coefficient": 0.78},
+    "90-93": {"description": "Attività artistiche, sportive, intrattenimento", "coefficient": 0.67},
+    "94-96": {"description": "Altre attività di servizi", "coefficient": 0.67},
+    "97-98": {"description": "Attività di famiglie e convivenze", "coefficient": 0.67},
+    "99": {"description": "Organizzazioni extraterritoriali", "coefficient": 0.67}
+  },
+  "default": {"description": "Altre attività (codice non riconosciuto)", "coefficient": 0.67}
+}
