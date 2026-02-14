@@ -6,35 +6,71 @@ calls LLM, parses responses, extracts data, and transitions the FSM.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
-import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.admin.events import emit
+from src.calculators.cdq import calculate_cdq_capacity
+from src.calculators.dti import calculate_dti
+from src.calculators.income import normalize_income
 from src.conversation.fsm import FSM
 from src.conversation.prompts.consent import CONSENT_PROMPT
+from src.conversation.prompts.doc_request import DOC_REQUEST_PROMPT
+from src.conversation.prompts.employer_class import EMPLOYER_CLASS_PROMPT
 from src.conversation.prompts.employment_type import EMPLOYMENT_TYPE_PROMPT
+from src.conversation.prompts.household import HOUSEHOLD_PROMPT
+from src.conversation.prompts.liabilities import LIABILITIES_PROMPT
+from src.conversation.prompts.manual_collection import MANUAL_COLLECTION_PROMPT
 from src.conversation.prompts.needs_assessment import NEEDS_ASSESSMENT_PROMPT
+from src.conversation.prompts.pension_class import PENSION_CLASS_PROMPT
+from src.conversation.prompts.result import RESULT_PROMPT
+from src.conversation.prompts.scheduling import SCHEDULING_PROMPT
+from src.conversation.prompts.track_choice import TRACK_CHOICE_PROMPT
 from src.conversation.prompts.welcome import WELCOME_PROMPT
+from src.decoders.codice_fiscale import decode_cf
+from src.eligibility.engine import match_products
 from src.llm.client import llm_client
-from src.models.enums import ConversationState, MessageRole
+from src.models.calculation import CdQCalculation, DTICalculation
+from src.models.enums import ConversationState, DataSource, LiabilityType, MessageRole
+from src.models.extracted_data import ExtractedData
+from src.models.liability import Liability
 from src.models.message import Message
+from src.models.product_match import ProductMatch
 from src.models.session import Session as SessionModel
 from src.models.user import User
+from src.ocr.pipeline import process_document
+from src.schemas.eligibility import LiabilitySnapshot, UserProfile
 from src.schemas.events import EventType, SystemEvent
 
 logger = logging.getLogger(__name__)
 
-# Map states to their system prompts
+# Map states to their system prompts (DOC_PROCESSING and CALCULATING are programmatic)
 STATE_PROMPTS: dict[ConversationState, str] = {
     ConversationState.WELCOME: WELCOME_PROMPT,
     ConversationState.CONSENT: CONSENT_PROMPT,
     ConversationState.NEEDS_ASSESSMENT: NEEDS_ASSESSMENT_PROMPT,
     ConversationState.EMPLOYMENT_TYPE: EMPLOYMENT_TYPE_PROMPT,
+    ConversationState.EMPLOYER_CLASS: EMPLOYER_CLASS_PROMPT,
+    ConversationState.PENSION_CLASS: PENSION_CLASS_PROMPT,
+    ConversationState.TRACK_CHOICE: TRACK_CHOICE_PROMPT,
+    ConversationState.DOC_REQUEST: DOC_REQUEST_PROMPT,
+    ConversationState.MANUAL_COLLECTION: MANUAL_COLLECTION_PROMPT,
+    ConversationState.HOUSEHOLD: HOUSEHOLD_PROMPT,
+    ConversationState.LIABILITIES: LIABILITIES_PROMPT,
+    ConversationState.RESULT: RESULT_PROMPT,
+    ConversationState.SCHEDULING: SCHEDULING_PROMPT,
+}
+
+# States handled programmatically (no LLM call)
+PROGRAMMATIC_STATES: set[ConversationState] = {
+    ConversationState.CALCULATING,
+    ConversationState.DOC_PROCESSING,
 }
 
 # Fallback prompt for states without a dedicated prompt yet
@@ -43,6 +79,30 @@ that doesn't have a dedicated prompt yet. Politely tell the user (in Italian, fo
 that this feature is coming soon and suggest they call 800.99.00.90 to speak with a consultant.
 ---
 {"action": "clarify", "reason": "state_not_implemented"}"""
+
+# Maps data keys from LLM actions to Session model attributes
+SESSION_FIELD_MAP: dict[str, str] = {
+    "employment_type": "employment_type",
+    "employer_category": "employer_category",
+    "pension_source": "pension_source",
+    "track_type": "track_type",
+}
+
+# Liability type normalization from LLM output to enum values
+_LIABILITY_TYPE_MAP: dict[str, str] = {
+    "cessione_quinto": LiabilityType.CDQ.value,
+    "cessione_del_quinto": LiabilityType.CDQ.value,
+    "delegazione": LiabilityType.DELEGA.value,
+    "mutuo": LiabilityType.MUTUO.value,
+    "prestito_personale": LiabilityType.PRESTITO.value,
+    "prestito": LiabilityType.PRESTITO.value,
+    "finanziamento_auto": LiabilityType.AUTO.value,
+    "auto": LiabilityType.AUTO.value,
+    "finanziamento_rateale": LiabilityType.CONSUMER.value,
+    "carta_revolving": LiabilityType.REVOLVING.value,
+    "pignoramento": LiabilityType.PIGNORAMENTO.value,
+    "altro": LiabilityType.ALTRO.value,
+}
 
 
 def parse_llm_response(raw: str) -> tuple[str, dict | None]:
@@ -71,6 +131,198 @@ def parse_llm_response(raw: str) -> tuple[str, dict | None]:
     except json.JSONDecodeError:
         logger.warning("Failed to parse LLM action JSON: %s", json_str[:200])
         return text, None
+
+
+def _build_context_section(session: SessionModel) -> str:
+    """Build a context block from session fields and related data.
+
+    Appended to the system prompt so the LLM knows what has already
+    been collected (employment type, income, liabilities, etc.).
+    """
+    parts: list[str] = ["\n## Session Context (read-only, do not reveal raw data to user)"]
+
+    if session.employment_type:
+        parts.append(f"- employment_type: {session.employment_type}")
+    if session.employer_category:
+        parts.append(f"- employer_category: {session.employer_category}")
+    if session.pension_source:
+        parts.append(f"- pension_source: {session.pension_source}")
+    if session.track_type:
+        parts.append(f"- track_type: {session.track_type}")
+
+    # Include extracted data fields
+    if session.extracted_data:
+        parts.append("- Extracted data:")
+        for ed in session.extracted_data:
+            parts.append(f"  - {ed.field_name}: {ed.value} (source: {ed.source})")
+
+    # Include liabilities
+    if session.liabilities:
+        parts.append(f"- Liabilities ({len(session.liabilities)}):")
+        for lib in session.liabilities:
+            parts.append(f"  - {lib.type}: €{lib.monthly_installment}/month")
+
+    # Include eligibility results if available (for RESULT state)
+    if session.product_matches:
+        parts.append("- Product matches:")
+        for pm in session.product_matches:
+            status = "✅ Eligible" if pm.eligible else "❌ Not eligible"
+            parts.append(f"  - {pm.product_name}: {status} (rank: {pm.rank})")
+            if pm.estimated_terms:
+                parts.append(f"    Terms: {json.dumps(pm.estimated_terms, default=str)}")
+
+    if len(parts) == 1:
+        return ""  # No context to add
+    return "\n".join(parts)
+
+
+async def _persist_extracted_data(
+    db: AsyncSession,
+    session: SessionModel,
+    data: dict,
+    source: str = DataSource.SELF_DECLARED.value,
+) -> None:
+    """Save key-value pairs from LLM actions as ExtractedData rows."""
+    for field_name, value in data.items():
+        if field_name in SESSION_FIELD_MAP or field_name == "liability":
+            continue  # Session fields and liabilities handled separately
+        ed = ExtractedData(
+            session_id=session.id,
+            field_name=field_name,
+            value=str(value),
+            source=source,
+            confidence=1.0 if source == DataSource.SELF_DECLARED.value else 0.9,
+        )
+        db.add(ed)
+
+    await emit(SystemEvent(
+        event_type=EventType.DATA_EXTRACTED,
+        session_id=session.id,
+        data={"fields": list(data.keys()), "source": source},
+        source_module="conversation.engine",
+    ))
+
+
+async def _persist_liability(
+    db: AsyncSession,
+    session: SessionModel,
+    liability_data: dict,
+) -> None:
+    """Save a liability from the LLM's collect action."""
+    raw_type = str(liability_data.get("type", "altro"))
+    normalized_type = _LIABILITY_TYPE_MAP.get(raw_type, LiabilityType.ALTRO.value)
+
+    monthly_str = liability_data.get("monthly_installment", "0")
+    try:
+        monthly = Decimal(str(monthly_str))
+    except (InvalidOperation, ValueError):
+        monthly = Decimal("0")
+
+    remaining = liability_data.get("remaining_months")
+    if remaining is not None:
+        try:
+            remaining = int(remaining)
+        except (ValueError, TypeError):
+            remaining = None
+
+    liability = Liability(
+        session_id=session.id,
+        type=normalized_type,
+        monthly_installment=monthly,
+        remaining_months=remaining,
+        detected_from=DataSource.SELF_DECLARED.value,
+    )
+    db.add(liability)
+
+    await emit(SystemEvent(
+        event_type=EventType.DATA_EXTRACTED,
+        session_id=session.id,
+        data={"liability_type": normalized_type, "monthly": str(monthly)},
+        source_module="conversation.engine",
+    ))
+
+
+def _get_extracted_value(session: SessionModel, field_name: str) -> str | None:
+    """Look up a field value from the session's extracted data."""
+    for ed in session.extracted_data:
+        if ed.field_name == field_name:
+            return ed.value
+    return None
+
+
+def _build_user_profile(session: SessionModel) -> UserProfile:
+    """Build a UserProfile from session fields + ExtractedData + Liabilities."""
+    from src.models.enums import EmployerCategory, EmploymentType, PensionSource
+
+    employment_type = EmploymentType(session.employment_type or "dipendente")
+
+    employer_category = None
+    if session.employer_category:
+        employer_category = EmployerCategory(session.employer_category)
+
+    pension_source = None
+    if session.pension_source:
+        pension_source = PensionSource(session.pension_source)
+
+    # Determine net monthly income from extracted data
+    net_income = Decimal("0")
+    raw_income_field = {
+        EmploymentType.DIPENDENTE: "net_salary",
+        EmploymentType.PENSIONATO: "net_pension",
+        EmploymentType.PARTITA_IVA: "annual_revenue",
+        EmploymentType.DISOCCUPATO: "net_salary",
+    }.get(employment_type, "net_salary")
+
+    raw_value = _get_extracted_value(session, raw_income_field)
+    if raw_value:
+        try:
+            raw_decimal = Decimal(raw_value)
+            if employment_type == EmploymentType.PARTITA_IVA:
+                ateco = _get_extracted_value(session, "ateco_code")
+                income_result = normalize_income(
+                    employment_type.value.upper(),
+                    raw_decimal,
+                    ateco_code=ateco,
+                )
+                net_income = income_result.monthly_net
+            else:
+                net_income = raw_decimal
+        except (InvalidOperation, ValueError):
+            logger.warning("Could not parse income value: %s", raw_value)
+
+    # Age from extracted data (CF decode or manual)
+    age = 0
+    age_str = _get_extracted_value(session, "age")
+    if age_str:
+        with contextlib.suppress(ValueError, TypeError):
+            age = int(age_str)
+
+    # Ex-public employee flag
+    ex_pub_str = _get_extracted_value(session, "ex_public_employee")
+    ex_public = ex_pub_str == "true" if ex_pub_str else False
+
+    # Build liability snapshots
+    liabilities: list[LiabilitySnapshot] = []
+    for lib in session.liabilities:
+        liabilities.append(LiabilitySnapshot(
+            type=LiabilityType(lib.type),
+            monthly_installment=lib.monthly_installment or Decimal("0"),
+            remaining_months=lib.remaining_months,
+            total_months=lib.total_months,
+            paid_months=lib.paid_months,
+            residual_amount=lib.residual_amount,
+            renewable=lib.renewable,
+        ))
+
+    return UserProfile(
+        employment_type=employment_type,
+        employer_category=employer_category,
+        pension_source=pension_source,
+        ex_public_employee=ex_public,
+        net_monthly_income=net_income,
+        age=age,
+        liabilities=liabilities,
+    )
 
 
 class ConversationEngine:
@@ -124,7 +376,7 @@ class ConversationEngine:
             session = SessionModel(
                 user_id=user.id,
                 current_state=ConversationState.WELCOME.value,
-                started_at=datetime.now(timezone.utc),
+                started_at=datetime.now(UTC),
             )
             db.add(session)
             await db.flush()
@@ -146,6 +398,7 @@ class ConversationEngine:
         telegram_id: str,
         text: str,
         first_name: str | None = None,
+        image_bytes: bytes | None = None,
     ) -> str:
         """Process an incoming message and return the bot's response.
 
@@ -156,6 +409,7 @@ class ConversationEngine:
             telegram_id: Telegram user ID.
             text: The user's message text.
             first_name: User's Telegram first name.
+            image_bytes: Optional document image bytes for OCR processing.
 
         Returns:
             The bot's Italian response text (without the JSON action block).
@@ -168,7 +422,7 @@ class ConversationEngine:
         user_msg = Message(
             session_id=session.id,
             role=MessageRole.USER.value,
-            content=text,
+            content=text or "[documento inviato]",
             state_at_send=session.current_state,
         )
         db.add(user_msg)
@@ -177,16 +431,41 @@ class ConversationEngine:
             event_type=EventType.MESSAGE_RECEIVED,
             session_id=session.id,
             user_id=user.id,
-            data={"text_length": len(text), "state": session.current_state},
+            data={
+                "text_length": len(text) if text else 0,
+                "state": session.current_state,
+                "has_image": image_bytes is not None,
+            },
             source_module="conversation.engine",
         ))
 
-        # 3. Build FSM and get prompt for current state
+        # 3. Build FSM
         current_state = ConversationState(session.current_state)
         fsm = FSM(session_id=session.id, initial_state=current_state)
+
+        # 4. Handle image upload in DOC_REQUEST state → OCR pipeline
+        if image_bytes and current_state == ConversationState.DOC_REQUEST:
+            response_text = await self._handle_ocr_upload(
+                db, session, user, fsm, image_bytes
+            )
+            return await self._save_and_return(db, session, user, response_text)
+
+        # 5. Route programmatic states (CALCULATING, DOC_PROCESSING)
+        if current_state in PROGRAMMATIC_STATES:
+            response_text = await self._handle_programmatic_state(
+                db, session, user, fsm, current_state, text
+            )
+            return await self._save_and_return(db, session, user, response_text)
+
+        # 6. Get prompt for current state
         system_prompt = STATE_PROMPTS.get(current_state, FALLBACK_PROMPT)
 
-        # 4. Load recent conversation history for context
+        # Inject session context into prompt
+        context_section = _build_context_section(session)
+        if context_section:
+            system_prompt = system_prompt + "\n" + context_section
+
+        # 7. Load recent conversation history for context
         result = await db.execute(
             select(Message)
             .where(Message.session_id == session.id)
@@ -195,7 +474,7 @@ class ConversationEngine:
         )
         recent_messages = list(reversed(result.scalars().all()))
 
-        # Build messages list for LLM (exclude current message, it's already added)
+        # Build messages list for LLM
         llm_messages: list[dict[str, str]] = []
         for msg in recent_messages:
             if msg.role == MessageRole.SYSTEM.value:
@@ -205,7 +484,7 @@ class ConversationEngine:
                 "content": msg.content,
             })
 
-        # 5. Call LLM
+        # 8. Call LLM
         try:
             raw_response = await llm_client.chat(
                 system_prompt=system_prompt,
@@ -220,39 +499,78 @@ class ConversationEngine:
                 '{"action": "clarify", "reason": "llm_error"}'
             )
 
-        # 6. Parse response
+        # 9. Parse response
         response_text, action = parse_llm_response(raw_response)
 
-        # 7. Handle action (transition or collect data)
+        # 10. Handle action (transition or collect data)
         if action is not None:
-            action_type = action.get("action")
-            trigger = action.get("trigger")
-            data = action.get("data", {})
+            await self._handle_action(db, session, fsm, current_state, action)
 
-            if action_type == "transition" and trigger:
-                if fsm.can_transition(trigger):
-                    await fsm.transition(trigger)
-                    session.current_state = fsm.current_state.value
+        # 11. If we just transitioned to CALCULATING, handle it immediately
+        new_state = ConversationState(session.current_state)
+        if new_state == ConversationState.CALCULATING:
+            calc_response = await self._handle_calculating(db, session, user, fsm)
+            # Append calculation results to response
+            response_text = response_text + "\n\n" + calc_response
 
-                    # Store extracted data on session if relevant
-                    if "employment_type" in data:
-                        session.employment_type = data["employment_type"]
-                    if "employer_category" in data:
-                        session.employer_category = data["employer_category"]
-                    if "pension_source" in data:
-                        session.pension_source = data["pension_source"]
-                else:
-                    logger.warning(
-                        "Invalid transition trigger '%s' from state %s",
-                        trigger,
-                        current_state.value,
-                    )
+        return await self._save_and_return(db, session, user, response_text)
 
-            elif action_type == "collect" and data:
-                logger.info("Collected data: %s (session=%s)", data, session.id)
-                # Data collection without transition — store for later
+    async def _handle_action(
+        self,
+        db: AsyncSession,
+        session: SessionModel,
+        fsm: FSM,
+        current_state: ConversationState,
+        action: dict,
+    ) -> None:
+        """Process an LLM action (transition, collect, or clarify)."""
+        action_type = action.get("action")
+        trigger = action.get("trigger")
+        data = action.get("data", {})
 
-        # 8. Save bot response
+        if action_type == "transition" and trigger:
+            if fsm.can_transition(trigger):
+                await fsm.transition(trigger)
+                session.current_state = fsm.current_state.value
+
+                # Store session-level fields
+                for data_key, session_attr in SESSION_FIELD_MAP.items():
+                    if data_key in data:
+                        setattr(session, session_attr, data[data_key])
+
+                # Persist extracted data fields
+                if data:
+                    await _persist_extracted_data(db, session, data)
+            else:
+                logger.warning(
+                    "Invalid transition trigger '%s' from state %s",
+                    trigger,
+                    current_state.value,
+                )
+
+        elif action_type == "collect" and data:
+            # Check for liability data
+            if "liability" in data:
+                await _persist_liability(db, session, data["liability"])
+
+            # Store session-level fields from collect actions too
+            for data_key, session_attr in SESSION_FIELD_MAP.items():
+                if data_key in data:
+                    setattr(session, session_attr, data[data_key])
+
+            # Persist other extracted data
+            await _persist_extracted_data(db, session, data)
+
+            logger.info("Collected data: %s (session=%s)", list(data.keys()), session.id)
+
+    async def _save_and_return(
+        self,
+        db: AsyncSession,
+        session: SessionModel,
+        user: User,
+        response_text: str,
+    ) -> str:
+        """Save bot response message, update counts, emit event, and return."""
         bot_msg = Message(
             session_id=session.id,
             role=MessageRole.ASSISTANT.value,
@@ -261,7 +579,6 @@ class ConversationEngine:
         )
         db.add(bot_msg)
 
-        # Update message count
         session.message_count = (session.message_count or 0) + 2
 
         await emit(SystemEvent(
@@ -273,8 +590,373 @@ class ConversationEngine:
         ))
 
         await db.flush()
+        return response_text
+
+    async def _handle_programmatic_state(
+        self,
+        db: AsyncSession,
+        session: SessionModel,
+        user: User,
+        fsm: FSM,
+        state: ConversationState,
+        text: str,
+    ) -> str:
+        """Route programmatic states that don't use the LLM."""
+        if state == ConversationState.CALCULATING:
+            return await self._handle_calculating(db, session, user, fsm)
+        if state == ConversationState.DOC_PROCESSING:
+            return await self._handle_doc_processing(db, session, user, fsm, text)
+        return (
+            "Mi scusi, si è verificato un errore. "
+            "Può chiamare il numero verde 800.99.00.90 per assistenza."
+        )
+
+    async def _handle_calculating(
+        self,
+        db: AsyncSession,
+        session: SessionModel,
+        user: User,
+        fsm: FSM,
+    ) -> str:
+        """Run eligibility engine, persist results, transition to RESULT.
+
+        1. Build UserProfile from session data
+        2. Run match_products → persist ProductMatch rows
+        3. Calculate DTI → persist DTICalculation
+        4. Calculate CdQ capacity → persist CdQCalculation (if applicable)
+        5. Transition CALCULATING → RESULT
+        6. Call LLM with RESULT_PROMPT + eligibility context
+        """
+        profile = _build_user_profile(session)
+        eligibility_result = match_products(profile)
+
+        # Persist product matches
+        for match in eligibility_result.matches:
+            pm = ProductMatch(
+                session_id=session.id,
+                product_name=match.product_name,
+                sub_type=match.sub_type,
+                eligible=match.eligible,
+                conditions={
+                    "conditions": [c.model_dump() for c in match.conditions],
+                    "ineligibility_reason": match.ineligibility_reason,
+                },
+                estimated_terms=match.estimated_terms.model_dump() if match.estimated_terms else None,
+                rank=match.rank,
+            )
+            db.add(pm)
+
+        # Calculate and persist DTI
+        obligations = [
+            lib.monthly_installment or Decimal("0")
+            for lib in session.liabilities
+        ]
+        dti_result = calculate_dti(profile.net_monthly_income, obligations)
+        dti_calc = DTICalculation(
+            session_id=session.id,
+            monthly_income=dti_result.monthly_income,
+            total_obligations=dti_result.total_obligations,
+            proposed_installment=dti_result.proposed_installment,
+            current_dti=dti_result.current_dti,
+            projected_dti=dti_result.projected_dti,
+        )
+        db.add(dti_calc)
+
+        await emit(SystemEvent(
+            event_type=EventType.DTI_CALCULATED,
+            session_id=session.id,
+            user_id=user.id,
+            data={
+                "current_dti": str(dti_result.current_dti),
+                "risk_level": dti_result.risk_level,
+            },
+            source_module="conversation.engine",
+        ))
+
+        # Calculate and persist CdQ capacity (for dipendente/pensionato)
+        if profile.employment_type.value in ("dipendente", "pensionato"):
+            existing_cdq = sum(
+                (lib.monthly_installment or Decimal("0"))
+                for lib in session.liabilities
+                if lib.type == LiabilityType.CDQ.value
+            )
+            existing_delega = sum(
+                (lib.monthly_installment or Decimal("0"))
+                for lib in session.liabilities
+                if lib.type == LiabilityType.DELEGA.value
+            )
+            cdq_result = calculate_cdq_capacity(
+                profile.net_monthly_income,
+                existing_cdq=existing_cdq,
+                existing_delega=existing_delega,
+            )
+            cdq_calc = CdQCalculation(
+                session_id=session.id,
+                net_income=cdq_result.net_income,
+                max_cdq_rata=cdq_result.max_cdq_rata,
+                existing_cdq=cdq_result.existing_cdq,
+                available_cdq=cdq_result.available_cdq,
+                max_delega_rata=cdq_result.max_delega_rata,
+                existing_delega=cdq_result.existing_delega,
+                available_delega=cdq_result.available_delega,
+            )
+            db.add(cdq_calc)
+
+            await emit(SystemEvent(
+                event_type=EventType.CDQ_CALCULATED,
+                session_id=session.id,
+                user_id=user.id,
+                data={
+                    "available_cdq": str(cdq_result.available_cdq),
+                    "available_delega": str(cdq_result.available_delega),
+                },
+                source_module="conversation.engine",
+            ))
+
+        # Store eligibility summary as ExtractedData for RESULT prompt context
+        eligible_products = [m.product_name for m in eligibility_result.matches if m.eligible]
+        summary_value = json.dumps({
+            "eligible_products": eligible_products,
+            "total_evaluated": len(eligibility_result.matches),
+            "dti_risk": dti_result.risk_level,
+            "suggestions": [s.model_dump() for s in eligibility_result.suggestions],
+        }, default=str)
+        ed = ExtractedData(
+            session_id=session.id,
+            field_name="eligibility_summary",
+            value=summary_value,
+            source=DataSource.COMPUTED.value,
+            confidence=1.0,
+        )
+        db.add(ed)
+
+        await emit(SystemEvent(
+            event_type=EventType.ELIGIBILITY_CHECKED,
+            session_id=session.id,
+            user_id=user.id,
+            data={
+                "eligible_count": len(eligible_products),
+                "total_count": len(eligibility_result.matches),
+            },
+            source_module="conversation.engine",
+        ))
+
+        # Transition CALCULATING → RESULT
+        if fsm.can_transition("done"):
+            await fsm.transition("done")
+            session.current_state = fsm.current_state.value
+
+        await db.flush()
+
+        # Now call LLM with RESULT_PROMPT to generate Italian response
+        context_section = _build_context_section(session)
+        result_prompt = RESULT_PROMPT
+        if context_section:
+            result_prompt = result_prompt + "\n" + context_section
+
+        try:
+            raw_response = await llm_client.chat(
+                system_prompt=result_prompt,
+                messages=[{
+                    "role": "user",
+                    "content": "Mostrami i risultati della verifica.",
+                }],
+            )
+        except Exception:
+            logger.exception("LLM call failed for RESULT state (session %s)", session.id)
+            eligible_names = ", ".join(eligible_products) if eligible_products else "nessuno"
+            raw_response = (
+                f"Ecco i risultati: prodotti disponibili: {eligible_names}.\n\n"
+                "⚠️ Questa è una verifica preliminare. "
+                "Contatti il numero verde 800.99.00.90 per una consulenza personalizzata.\n"
+                "---\n"
+                '{"action": "clarify", "reason": "presenting_results"}'
+            )
+
+        response_text, action = parse_llm_response(raw_response)
+
+        # Handle any action from the RESULT prompt
+        if action is not None:
+            result_state = ConversationState(session.current_state)
+            result_fsm = FSM(session_id=session.id, initial_state=result_state)
+            await self._handle_action(db, session, result_fsm, result_state, action)
 
         return response_text
+
+    async def _handle_doc_processing(
+        self,
+        db: AsyncSession,
+        session: SessionModel,
+        user: User,
+        fsm: FSM,
+        text: str,
+    ) -> str:
+        """Handle document confirmation flow.
+
+        User confirms or rejects extracted OCR data:
+        - sì/confermo → transition("success") → HOUSEHOLD
+        - no/correggi → transition("retry") → DOC_REQUEST
+        """
+        positive = text.lower().strip() in (
+            "sì", "si", "yes", "ok", "confermo", "corretto", "va bene", "esatto",
+        )
+        negative = text.lower().strip() in (
+            "no", "non", "sbagliato", "errato", "correggi", "rifai", "riprova",
+        )
+
+        if positive and fsm.can_transition("success"):
+            # Upgrade OCR data source to confirmed
+            for ed in session.extracted_data:
+                if ed.source == DataSource.OCR.value:
+                    ed.source = DataSource.OCR_CONFIRMED.value
+
+            await fsm.transition("success")
+            session.current_state = fsm.current_state.value
+
+            await emit(SystemEvent(
+                event_type=EventType.DATA_CONFIRMED,
+                session_id=session.id,
+                user_id=user.id,
+                data={"confirmed": True},
+                source_module="conversation.engine",
+            ))
+
+            return (
+                "Perfetto, dati confermati! ✅\n\n"
+                "Procediamo con qualche altra informazione sul suo nucleo familiare."
+            )
+
+        if negative and fsm.can_transition("retry"):
+            await fsm.transition("retry")
+            session.current_state = fsm.current_state.value
+
+            return (
+                "Nessun problema. Mi invii nuovamente il documento con una foto più chiara, "
+                "oppure possiamo procedere con il percorso manuale."
+            )
+
+        # Unclear response
+        return (
+            "Mi scusi, non ho capito. I dati estratti dal documento sono corretti?\n\n"
+            "Risponda con **sì** per confermare o **no** per riprovare."
+        )
+
+    async def _handle_ocr_upload(
+        self,
+        db: AsyncSession,
+        session: SessionModel,
+        user: User,
+        fsm: FSM,
+        image_bytes: bytes,
+    ) -> str:
+        """Process an uploaded document through the OCR pipeline.
+
+        1. Determine expected document type from employment_type
+        2. Call process_document()
+        3. Save OCR fields as ExtractedData (source=OCR)
+        4. Decode codice fiscale if found → save age/gender (source=cf_decode)
+        5. Transition DOC_REQUEST → DOC_PROCESSING
+        6. Present extracted data for confirmation
+        """
+        from src.models.enums import DocumentType
+
+        # Determine expected doc type from employment
+        expected_doc_type = None
+        if session.employment_type == "dipendente":
+            expected_doc_type = DocumentType.BUSTA_PAGA
+        elif session.employment_type == "pensionato":
+            expected_doc_type = DocumentType.CEDOLINO_PENSIONE
+
+        ocr_result = await process_document(
+            raw_image_bytes=image_bytes,
+            session_id=session.id,
+            user_id=user.id,
+            expected_doc_type=expected_doc_type,
+        )
+
+        if ocr_result.error:
+            return (
+                f"⚠️ {ocr_result.error}\n\n"
+                "Può riprovare con un'altra foto oppure passare al percorso manuale."
+            )
+
+        # Save OCR fields as ExtractedData
+        extracted_fields: dict[str, str] = {}
+        if ocr_result.extraction_result:
+            result_dict = ocr_result.extraction_result.model_dump(exclude_none=True)
+            skip_keys = {"confidence", "deductions"}
+            for key, value in result_dict.items():
+                if key in skip_keys:
+                    continue
+                str_value = str(value)
+                extracted_fields[key] = str_value
+                ed = ExtractedData(
+                    session_id=session.id,
+                    field_name=key,
+                    value=str_value,
+                    source=DataSource.OCR.value,
+                    confidence=ocr_result.extraction_result.confidence.get(key, 0.0),
+                )
+                db.add(ed)
+
+        # Decode codice fiscale if found
+        cf_value = extracted_fields.get("codice_fiscale")
+        if cf_value:
+            try:
+                cf_result = decode_cf(cf_value)
+                for field, value in [
+                    ("age", str(cf_result.age)),
+                    ("gender", cf_result.gender),
+                    ("birthdate", cf_result.birthdate.isoformat()),
+                    ("birthplace", cf_result.birthplace_name),
+                ]:
+                    db.add(ExtractedData(
+                        session_id=session.id,
+                        field_name=field,
+                        value=value,
+                        source=DataSource.CF_DECODE.value,
+                        confidence=1.0 if cf_result.valid else 0.5,
+                    ))
+            except ValueError:
+                logger.warning("Failed to decode CF: %s", cf_value)
+
+        # Transition DOC_REQUEST → DOC_PROCESSING
+        if fsm.can_transition("doc_received"):
+            await fsm.transition("doc_received")
+            session.current_state = fsm.current_state.value
+
+        # Build confirmation message
+        parts = ["📄 Ho estratto i seguenti dati dal documento:\n"]
+        display_map = {
+            "employee_name": "Nome",
+            "pensioner_name": "Nome",
+            "codice_fiscale": "Codice Fiscale",
+            "employer_name": "Datore di lavoro",
+            "net_salary": "Stipendio netto",
+            "net_pension": "Pensione netta",
+            "gross_salary": "Stipendio lordo",
+            "gross_pension": "Pensione lorda",
+            "contract_type": "Tipo contratto",
+            "hiring_date": "Data assunzione",
+            "pension_type": "Tipo pensione",
+            "pension_source": "Ente pensionistico",
+        }
+        for key, label in display_map.items():
+            if key in extracted_fields:
+                value = extracted_fields[key]
+                if key in ("net_salary", "net_pension", "gross_salary", "gross_pension"):
+                    value = f"€{value}"
+                parts.append(f"- {label}: {value}")
+
+        if ocr_result.fields_needing_confirmation:
+            parts.append(
+                "\n⚠️ Alcuni campi hanno bassa confidenza: "
+                + ", ".join(ocr_result.fields_needing_confirmation)
+            )
+
+        parts.append("\nI dati sono corretti? Risponda **sì** per confermare o **no** per riprovare.")
+
+        return "\n".join(parts)
 
 
 # Module-level singleton
