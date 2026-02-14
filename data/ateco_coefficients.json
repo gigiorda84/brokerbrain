@@ -1,0 +1,11 @@
+{
+  "10-43": {"description": "Manifattura", "coefficient": 0.86},
+  "45": {"description": "Commercio veicoli", "coefficient": 0.40},
+  "46-47": {"description": "Commercio", "coefficient": 0.40},
+  "55-63": {"description": "Ospitalità/ristorazione", "coefficient": 0.40},
+  "64-66": {"description": "Finanza/assicurazioni", "coefficient": 0.78},
+  "69-75": {"description": "Servizi professionali", "coefficient": 0.78},
+  "85": {"description": "Istruzione", "coefficient": 0.78},
+  "86-88": {"description": "Sanità/assistenza", "coefficient": 0.78},
+  "default": {"description": "Altre attività", "coefficient": 0.67}
+}
