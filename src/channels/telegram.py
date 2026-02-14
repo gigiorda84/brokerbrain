@@ -77,6 +77,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
 
 
+async def handle_photo_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle incoming photos and image documents — download and route to conversation engine."""
+    if update.effective_user is None or update.message is None:
+        return
+
+    telegram_id = str(update.effective_user.id)
+    first_name = update.effective_user.first_name
+    text = update.message.caption or "[documento inviato]"
+
+    try:
+        if update.message.photo:
+            # Grab the highest-resolution variant (last in list)
+            file = await update.message.photo[-1].get_file()
+        elif update.message.document:
+            file = await update.message.document.get_file()
+        else:
+            return
+
+        data = await file.download_as_bytearray()
+        image_bytes = bytes(data)
+    except Exception:
+        logger.exception("Failed to download file from user %s", telegram_id)
+        await update.message.reply_text(
+            "Mi scusi, non sono riuscito a scaricare il file. "
+            "Riprovi tra qualche istante o chiami il 800.99.00.90."
+        )
+        return
+
+    async with async_session_factory() as db:
+        try:
+            response = await conversation_engine.process_message(
+                db=db,
+                telegram_id=telegram_id,
+                text=text,
+                first_name=first_name,
+                image_bytes=image_bytes,
+            )
+            await db.commit()
+            await update.message.reply_text(response)
+        except Exception:
+            logger.exception("Error processing photo/document from user %s", telegram_id)
+            await update.message.reply_text(
+                "Mi scusi, si è verificato un errore. "
+                "Riprovi tra qualche istante o chiami il 800.99.00.90."
+            )
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/aiuto command — show help."""
     if update.message is None:
@@ -122,6 +169,7 @@ def create_telegram_app() -> Application:
     app.add_handler(CommandHandler("aiuto", help_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("operatore", operator_command))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Telegram bot application created")
