@@ -35,6 +35,32 @@ class PensionSource(str, Enum):
     ALTRO = "altro"
 
 
+class ContractType(str, Enum):
+    """Employment contract type — extracted from busta paga."""
+
+    INDETERMINATO = "indeterminato"
+    DETERMINATO = "determinato"
+    APPRENDISTATO = "apprendistato"
+
+
+class PensionType(str, Enum):
+    """Type of pension — extracted from cedolino pensione."""
+
+    VECCHIAIA = "vecchiaia"
+    ANTICIPATA = "anticipata"
+    INVALIDITA = "invalidita"
+    SUPERSTITI = "superstiti"
+    SOCIALE = "sociale"
+
+
+class TaxRegime(str, Enum):
+    """Tax regime — extracted from dichiarazione redditi."""
+
+    FORFETTARIO = "forfettario"
+    ORDINARIO = "ordinario"
+    SEMPLIFICATO = "semplificato"
+
+
 class DataSource(str, Enum):
     """Tracks where each data field came from — feeds dossier confidence."""
 

@@ -184,6 +184,118 @@ class OllamaClient:
             logger.exception("LLM HTTP error for model %s", model)
             raise
 
+    async def chat_vision(
+        self,
+        system_prompt: str,
+        text_prompt: str,
+        image_base64: str,
+        model: str | None = None,
+        temperature: float = 0.1,
+        max_tokens: int = 1000,
+    ) -> str:
+        """Send a vision chat request with an image to Ollama.
+
+        Args:
+            system_prompt: System-level instructions for the VLM.
+            text_prompt: User text prompt to accompany the image.
+            image_base64: Base64-encoded image data.
+            model: Model name override. Defaults to vision model.
+            temperature: Sampling temperature (low for OCR).
+            max_tokens: Max response tokens.
+
+        Returns:
+            The VLM's text response.
+        """
+        model = model or settings.llm.vision_model
+        await self.ensure_model(model)
+
+        timeout = settings.llm.ocr_timeout
+
+        api_messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
+                    },
+                    {"type": "text", "text": text_prompt},
+                ],
+            },
+        ]
+
+        prompt_hash = hashlib.md5(text_prompt.encode()).hexdigest()[:8]
+
+        await emit(SystemEvent(
+            event_type=EventType.LLM_REQUEST,
+            data={
+                "model": model,
+                "prompt_hash": prompt_hash,
+                "vision": True,
+            },
+            source_module="llm.client",
+        ))
+
+        start = time.monotonic()
+        try:
+            response = await self._client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": model,
+                    "messages": api_messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "stream": False,
+                },
+                timeout=float(timeout),
+            )
+            response.raise_for_status()
+            data: dict[str, Any] = response.json()
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+
+            content: str = data["choices"][0]["message"]["content"]
+            usage = data.get("usage", {})
+
+            await emit(SystemEvent(
+                event_type=EventType.LLM_RESPONSE,
+                data={
+                    "model": model,
+                    "latency_ms": elapsed_ms,
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
+                    "completion_tokens": usage.get("completion_tokens", 0),
+                    "vision": True,
+                },
+                source_module="llm.client",
+            ))
+
+            logger.info(
+                "VLM response: model=%s latency=%dms tokens=%d",
+                model,
+                elapsed_ms,
+                usage.get("completion_tokens", 0),
+            )
+            return content
+
+        except httpx.TimeoutException:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            await emit(SystemEvent(
+                event_type=EventType.LLM_ERROR,
+                data={"model": model, "error": "timeout", "latency_ms": elapsed_ms, "vision": True},
+                source_module="llm.client",
+            ))
+            logger.error("VLM timeout after %dms for model %s", elapsed_ms, model)
+            raise
+
+        except httpx.HTTPError as exc:
+            await emit(SystemEvent(
+                event_type=EventType.LLM_ERROR,
+                data={"model": model, "error": str(exc), "vision": True},
+                source_module="llm.client",
+            ))
+            logger.exception("VLM HTTP error for model %s", model)
+            raise
+
     async def close(self) -> None:
         """Close the HTTP client."""
         await self._client.aclose()
