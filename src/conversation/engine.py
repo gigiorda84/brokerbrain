@@ -14,6 +14,7 @@ from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.admin.events import emit
 from src.calculators.cdq import calculate_cdq_capacity
@@ -373,6 +374,12 @@ class ConversationEngine:
                 ConversationState.ABANDONED.value,
                 ConversationState.HUMAN_ESCALATION.value,
             ]))
+            .options(
+                selectinload(SessionModel.extracted_data),
+                selectinload(SessionModel.liabilities),
+                selectinload(SessionModel.product_matches),
+                selectinload(SessionModel.messages),
+            )
             .order_by(SessionModel.created_at.desc())
             .limit(1)
         )
@@ -386,6 +393,10 @@ class ConversationEngine:
             )
             db.add(session)
             await db.flush()
+            # Reload session with all selectin relationships eagerly loaded
+            await db.refresh(session, attribute_names=[
+                "extracted_data", "liabilities", "product_matches", "messages",
+            ])
 
             await emit(SystemEvent(
                 event_type=EventType.SESSION_STARTED,
@@ -432,6 +443,7 @@ class ConversationEngine:
             state_at_send=session.current_state,
         )
         db.add(user_msg)
+        await db.flush()
 
         await emit(SystemEvent(
             event_type=EventType.MESSAGE_RECEIVED,

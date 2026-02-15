@@ -47,7 +47,7 @@ class LLMSettings(BaseSettings):
         default="qwen2.5-vl:7b-q4_K_M",
         description="Model for OCR (Qwen2.5-VL 7B)",
     )
-    conversation_timeout: int = Field(default=30, description="Conversation LLM timeout in seconds")
+    conversation_timeout: int = Field(default=90, description="Conversation LLM timeout in seconds")
     ocr_timeout: int = Field(default=60, description="OCR LLM timeout in seconds")
     keep_alive: str = Field(default="5m", description="Ollama keep_alive parameter")
 
