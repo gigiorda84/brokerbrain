@@ -184,7 +184,9 @@ class TestPersistExtractedData:
         assert db.add.call_count == 1
         added = db.add.call_args[0][0]
         assert added.field_name == "net_salary"
-        assert added.value == "1800.00"
+        # net_salary is an encrypted field — verify it's marked and decryptable
+        assert added.value_encrypted is True
+        assert added.value != "1800.00"  # should be ciphertext
 
     @pytest.mark.asyncio
     async def test_skips_liability_key(self):
@@ -266,12 +268,13 @@ class TestBuildUserProfile:
         session.employer_category = kwargs.get("employer_category")
         session.pension_source = kwargs.get("pension_source")
 
-        # Build extracted data mocks
+        # Build extracted data mocks (unencrypted for test convenience)
         eds = []
         for field, value in kwargs.get("extracted_fields", {}).items():
             ed = MagicMock()
             ed.field_name = field
             ed.value = value
+            ed.value_encrypted = False
             eds.append(ed)
         session.extracted_data = eds
         session.liabilities = kwargs.get("liabilities", [])
@@ -330,6 +333,7 @@ class TestGetExtractedValue:
         ed = MagicMock()
         ed.field_name = "net_salary"
         ed.value = "2000"
+        ed.value_encrypted = False
         session = MagicMock()
         session.extracted_data = [ed]
         assert _get_extracted_value(session, "net_salary") == "2000"

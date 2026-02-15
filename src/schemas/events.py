@@ -48,6 +48,9 @@ class EventType(str, Enum):
     ELIGIBILITY_CHECKED = "eligibility.checked"
     PRODUCT_MATCHED = "eligibility.product_matched"
 
+    # Dossier
+    DOSSIER_GENERATED = "dossier.generated"
+
     # Scheduling
     APPOINTMENT_REQUESTED = "appointment.requested"
     APPOINTMENT_BOOKED = "appointment.booked"

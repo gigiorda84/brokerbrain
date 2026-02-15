@@ -25,7 +25,6 @@ data/*.xlsx
 !data/.gitkeep
 
 # Alembic
-alembic/versions/*.py
 !alembic/versions/.gitkeep
 
 # Docker volumes

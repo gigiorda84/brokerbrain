@@ -47,6 +47,7 @@ from src.models.user import User
 from src.ocr.pipeline import process_document
 from src.schemas.eligibility import LiabilitySnapshot, UserProfile
 from src.schemas.events import EventType, SystemEvent
+from src.security.encryption import field_encryptor
 
 logger = logging.getLogger(__name__)
 
@@ -186,10 +187,13 @@ async def _persist_extracted_data(
     for field_name, value in data.items():
         if field_name in SESSION_FIELD_MAP or field_name == "liability":
             continue  # Session fields and liabilities handled separately
+        raw_value = str(value)
+        should_encrypt = field_encryptor.should_encrypt(field_name)
         ed = ExtractedData(
             session_id=session.id,
             field_name=field_name,
-            value=str(value),
+            value=field_encryptor.encrypt(raw_value) if should_encrypt else raw_value,
+            value_encrypted=should_encrypt,
             source=source,
             confidence=1.0 if source == DataSource.SELF_DECLARED.value else 0.9,
         )
@@ -243,9 +247,11 @@ async def _persist_liability(
 
 
 def _get_extracted_value(session: SessionModel, field_name: str) -> str | None:
-    """Look up a field value from the session's extracted data."""
+    """Look up a field value from the session's extracted data, decrypting if needed."""
     for ed in session.extracted_data:
         if ed.field_name == field_name:
+            if ed.value_encrypted and ed.value:
+                return field_encryptor.decrypt(ed.value)
             return ed.value
     return None
 
@@ -890,10 +896,12 @@ class ConversationEngine:
                     continue
                 str_value = str(value)
                 extracted_fields[key] = str_value
+                should_encrypt = field_encryptor.should_encrypt(key)
                 ed = ExtractedData(
                     session_id=session.id,
                     field_name=key,
-                    value=str_value,
+                    value=field_encryptor.encrypt(str_value) if should_encrypt else str_value,
+                    value_encrypted=should_encrypt,
                     source=DataSource.OCR.value,
                     confidence=ocr_result.extraction_result.confidence.get(key, 0.0),
                 )
