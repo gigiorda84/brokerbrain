@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}BrokerBot Admin{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <style>
+        [hx-indicator] .htmx-indicator { display: none; }
+        .htmx-request .htmx-indicator { display: inline-block; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <div class="flex">
+        <!-- Sidebar -->
+        <aside class="w-64 bg-gray-900 min-h-screen fixed">
+            <div class="p-6">
+                <h1 class="text-white text-lg font-bold">BrokerBot Admin</h1>
+                <p class="text-gray-400 text-sm">ameconviene.it</p>
+            </div>
+            <nav class="mt-2">
+                {% set current_path = request.url.path %}
+                <a href="/admin/"
+                   class="flex items-center px-6 py-3 text-sm {{ 'bg-gray-800 text-white border-r-2 border-blue-400' if current_path == '/admin/' else 'text-gray-300 hover:bg-gray-800 hover:text-white' }}">
+                    <span class="mr-3">&#9632;</span> Dashboard
+                </a>
+                <a href="/admin/sessions"
+                   class="flex items-center px-6 py-3 text-sm {{ 'bg-gray-800 text-white border-r-2 border-blue-400' if '/sessions' in current_path and '/session/' not in current_path else 'text-gray-300 hover:bg-gray-800 hover:text-white' }}">
+                    <span class="mr-3">&#9776;</span> Sessioni
+                </a>
+                <a href="/admin/health"
+                   class="flex items-center px-6 py-3 text-sm {{ 'bg-gray-800 text-white border-r-2 border-blue-400' if '/health' in current_path else 'text-gray-300 hover:bg-gray-800 hover:text-white' }}">
+                    <span class="mr-3">&#9829;</span> Stato Sistema
+                </a>
+                <a href="/admin/audit"
+                   class="flex items-center px-6 py-3 text-sm {{ 'bg-gray-800 text-white border-r-2 border-blue-400' if '/audit' in current_path else 'text-gray-300 hover:bg-gray-800 hover:text-white' }}">
+                    <span class="mr-3">&#9998;</span> Log Audit
+                </a>
+                <a href="/admin/gdpr"
+                   class="flex items-center px-6 py-3 text-sm {{ 'bg-gray-800 text-white border-r-2 border-blue-400' if '/gdpr' in current_path else 'text-gray-300 hover:bg-gray-800 hover:text-white' }}">
+                    <span class="mr-3">&#9919;</span> GDPR
+                </a>
+            </nav>
+        </aside>
+
+        <!-- Main content -->
+        <main class="ml-64 flex-1 p-8">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+</body>
+</html>

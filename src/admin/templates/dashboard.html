@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - BrokerBot Admin{% endblock %}
+
+{% block content %}
+<h2 class="text-2xl font-bold text-gray-800 mb-6">Dashboard</h2>
+
+<!-- Stats cards -->
+<div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+    <div class="bg-white rounded-lg shadow p-6">
+        <p class="text-sm text-gray-500 uppercase tracking-wide">Sessioni oggi</p>
+        <p class="text-3xl font-bold text-gray-800 mt-2">{{ stats.total }}</p>
+    </div>
+    <div class="bg-white rounded-lg shadow p-6">
+        <p class="text-sm text-gray-500 uppercase tracking-wide">Completate</p>
+        <p class="text-3xl font-bold text-gray-800 mt-2">{{ stats.completed }}</p>
+    </div>
+    <div class="bg-white rounded-lg shadow p-6">
+        <p class="text-sm text-gray-500 uppercase tracking-wide">Qualificate</p>
+        <p class="text-3xl font-bold text-green-600 mt-2">{{ stats.qualified }}</p>
+    </div>
+    <div class="bg-white rounded-lg shadow p-6">
+        <p class="text-sm text-gray-500 uppercase tracking-wide">Tasso qualificazione</p>
+        <p class="text-3xl font-bold text-blue-600 mt-2">{{ stats.qual_rate|percentage }}</p>
+    </div>
+</div>
+
+<!-- Active sessions -->
+<div class="bg-white rounded-lg shadow mb-8">
+    <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+        <h3 class="text-lg font-semibold text-gray-800">Sessioni attive</h3>
+        <span class="text-xs text-gray-400">Aggiornamento automatico ogni 10s</span>
+    </div>
+    <div id="active-sessions"
+         hx-get="/admin/partials/active"
+         hx-trigger="every 10s"
+         hx-swap="innerHTML">
+        {% include "partials/active_list.html" %}
+    </div>
+</div>
+
+<!-- Recent alerts -->
+<div class="bg-white rounded-lg shadow">
+    <div class="px-6 py-4 border-b border-gray-200">
+        <h3 class="text-lg font-semibold text-gray-800">Avvisi recenti</h3>
+    </div>
+    <div class="p-6">
+        {% if alerts %}
+        <ul class="space-y-3">
+            {% for alert in alerts %}
+            <li class="flex items-start space-x-3">
+                {% if 'error' in alert.event_type %}
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">Errore</span>
+                {% elif 'alert' in alert.event_type %}
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">Avviso</span>
+                {% elif 'escalat' in alert.event_type %}
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">Escalation</span>
+                {% endif %}
+                <div class="flex-1">
+                    <p class="text-sm text-gray-800">{{ alert.event_type }}</p>
+                    <p class="text-xs text-gray-500">{{ alert.created_at|datetime }}{% if alert.session_id %} &mdash; Sessione {{ alert.session_id|string|truncate(8, True, '') }}{% endif %}</p>
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="text-gray-500 text-sm">Nessun avviso recente.</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

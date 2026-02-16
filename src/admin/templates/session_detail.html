@@ -1,0 +1,251 @@
+{% extends "base.html" %}
+{% block title %}Sessione {{ session_id[:8] if session_id else '?' }} - BrokerBot Admin{% endblock %}
+
+{% block content %}
+{% if session is none %}
+<div class="bg-red-50 border border-red-200 rounded-lg p-6 text-center">
+    <p class="text-red-800 text-lg font-semibold">Sessione non trovata</p>
+    <p class="text-red-600 text-sm mt-2">ID: <code>{{ session_id }}</code></p>
+    <a href="/admin/sessions" class="mt-4 inline-block text-blue-600 hover:text-blue-800 text-sm">Torna alle sessioni</a>
+</div>
+{% else %}
+
+<!-- Header card -->
+<div class="flex items-center justify-between mb-6">
+    <div>
+        <h2 class="text-2xl font-bold text-gray-800">Sessione {{ session.id|string|truncate(8, True, '') }}</h2>
+        <p class="text-sm text-gray-500 font-mono mt-1">{{ session.id }}</p>
+    </div>
+    <a href="/admin/sessions" class="text-sm text-blue-600 hover:text-blue-800">Torna alle sessioni</a>
+</div>
+
+<div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
+    <div class="bg-white rounded-lg shadow p-4">
+        <p class="text-xs text-gray-500 uppercase">Stato</p>
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium mt-1
+            {% if session.outcome is none %}bg-blue-100 text-blue-800{% else %}bg-gray-100 text-gray-800{% endif %}">
+            {{ session.current_state }}
+        </span>
+    </div>
+    <div class="bg-white rounded-lg shadow p-4">
+        <p class="text-xs text-gray-500 uppercase">Esito</p>
+        <p class="text-sm font-semibold mt-1
+            {% if session.outcome == 'qualified' %}text-green-600{% elif session.outcome == 'abandoned' %}text-red-600{% else %}text-gray-800{% endif %}">
+            {{ session.outcome or 'in corso' }}
+        </p>
+    </div>
+    <div class="bg-white rounded-lg shadow p-4">
+        <p class="text-xs text-gray-500 uppercase">Durata</p>
+        <p class="text-sm font-semibold mt-1">{{ session.started_at|duration }}</p>
+    </div>
+    <div class="bg-white rounded-lg shadow p-4">
+        <p class="text-xs text-gray-500 uppercase">Percorso</p>
+        <p class="text-sm font-semibold mt-1">{{ session.track_type or '-' }}</p>
+    </div>
+    <div class="bg-white rounded-lg shadow p-4">
+        <p class="text-xs text-gray-500 uppercase">Tipo impiego</p>
+        <p class="text-sm font-semibold mt-1">{{ session.employment_type or '-' }}</p>
+    </div>
+</div>
+
+<!-- Dati raccolti -->
+<div class="bg-white rounded-lg shadow mb-6">
+    <div class="px-6 py-4 border-b border-gray-200">
+        <h3 class="text-lg font-semibold text-gray-800">Dati raccolti</h3>
+    </div>
+    {% if fields %}
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Campo</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Valore</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Fonte</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Confidenza</th>
+            </tr>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-200">
+            {% for f in fields %}
+            <tr>
+                <td class="px-6 py-3 text-sm font-medium text-gray-800">{{ f.field_name }}</td>
+                <td class="px-6 py-3 text-sm text-gray-600 font-mono">{{ f.value or '-' }}</td>
+                <td class="px-6 py-3 text-sm">
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
+                        {% if f.source == 'ocr' %}bg-purple-100 text-purple-800
+                        {% elif f.source == 'cf_decode' %}bg-blue-100 text-blue-800
+                        {% elif f.source == 'manual' %}bg-yellow-100 text-yellow-800
+                        {% elif f.source == 'computed' %}bg-green-100 text-green-800
+                        {% else %}bg-gray-100 text-gray-800{% endif %}">{{ f.source }}</span>
+                </td>
+                <td class="px-6 py-3 text-sm">
+                    {% if f.confidence is not none %}
+                        {% if f.confidence < 0.7 %}
+                        <span class="text-red-600 font-medium">{{ f.confidence|confidence }}</span>
+                        {% elif f.confidence < 0.9 %}
+                        <span class="text-yellow-600">{{ f.confidence|confidence }}</span>
+                        {% else %}
+                        <span class="text-green-600">{{ f.confidence|confidence }}</span>
+                        {% endif %}
+                    {% else %}
+                    <span class="text-gray-400">-</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="p-6 text-sm text-gray-500">Nessun dato estratto.</div>
+    {% endif %}
+</div>
+
+<!-- Debiti -->
+{% if session.liabilities %}
+<div class="bg-white rounded-lg shadow mb-6">
+    <div class="px-6 py-4 border-b border-gray-200">
+        <h3 class="text-lg font-semibold text-gray-800">Debiti</h3>
+    </div>
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tipo</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Rata mensile</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Mesi rimanenti</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Residuo</th>
+            </tr>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-200">
+            {% for lib in session.liabilities %}
+            <tr>
+                <td class="px-6 py-3 text-sm text-gray-800">{{ lib.type }}</td>
+                <td class="px-6 py-3 text-sm text-gray-600">{{ lib.monthly_installment|currency if lib.monthly_installment else '-' }}</td>
+                <td class="px-6 py-3 text-sm text-gray-600">{{ lib.remaining_months or '-' }}</td>
+                <td class="px-6 py-3 text-sm text-gray-600">{{ lib.residual_amount|currency if lib.residual_amount else '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<!-- Calcoli -->
+{% if session.dti_calculations or session.cdq_calculations %}
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+    {% if session.dti_calculations %}
+    {% set dti = session.dti_calculations[-1] %}
+    <div class="bg-white rounded-lg shadow p-6">
+        <h3 class="text-lg font-semibold text-gray-800 mb-3">DTI</h3>
+        <div class="space-y-2">
+            <div class="flex justify-between">
+                <span class="text-sm text-gray-600">DTI corrente</span>
+                <span class="text-sm font-semibold">{{ dti.current_dti|percentage if dti.current_dti is not none else '-' }}</span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-sm text-gray-600">DTI proiettato</span>
+                <span class="text-sm font-semibold">{{ dti.projected_dti|percentage if dti.projected_dti is not none else '-' }}</span>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+    {% if session.cdq_calculations %}
+    {% set cdq = session.cdq_calculations[-1] %}
+    <div class="bg-white rounded-lg shadow p-6">
+        <h3 class="text-lg font-semibold text-gray-800 mb-3">Cessione del Quinto</h3>
+        <div class="space-y-2">
+            <div class="flex justify-between">
+                <span class="text-sm text-gray-600">CdQ disponibile</span>
+                <span class="text-sm font-semibold">{{ cdq.available_cdq|currency if cdq.available_cdq is not none else '-' }}</span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-sm text-gray-600">Delega disponibile</span>
+                <span class="text-sm font-semibold">{{ cdq.available_delega|currency if cdq.available_delega is not none else '-' }}</span>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+<!-- Prodotti compatibili -->
+{% if session.product_matches %}
+<div class="bg-white rounded-lg shadow mb-6">
+    <div class="px-6 py-4 border-b border-gray-200">
+        <h3 class="text-lg font-semibold text-gray-800">Prodotti compatibili</h3>
+    </div>
+    <ul class="divide-y divide-gray-200">
+        {% for pm in session.product_matches|sort(attribute='eligible', reverse=True) %}
+        <li class="px-6 py-3 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                {% if pm.eligible %}
+                <span class="text-green-500 text-lg">&#10003;</span>
+                {% else %}
+                <span class="text-red-500 text-lg">&#10007;</span>
+                {% endif %}
+                <span class="text-sm text-gray-800">{{ pm.product_name }}{% if pm.sub_type %} ({{ pm.sub_type }}){% endif %}</span>
+            </div>
+            {% if pm.rank %}
+            <span class="text-xs text-gray-500">Rank #{{ pm.rank }}</span>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+<!-- Documenti -->
+{% if session.documents %}
+<div class="bg-white rounded-lg shadow mb-6">
+    <div class="px-6 py-4 border-b border-gray-200">
+        <h3 class="text-lg font-semibold text-gray-800">Documenti</h3>
+    </div>
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tipo</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Confidenza</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tempo elab.</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Modello</th>
+            </tr>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-200">
+            {% for doc in session.documents %}
+            <tr>
+                <td class="px-6 py-3 text-sm text-gray-800">{{ doc.doc_type or '-' }}</td>
+                <td class="px-6 py-3 text-sm">{{ doc.overall_confidence|confidence if doc.overall_confidence is not none else '-' }}</td>
+                <td class="px-6 py-3 text-sm text-gray-600">{{ '%dms' % doc.processing_time_ms if doc.processing_time_ms else '-' }}</td>
+                <td class="px-6 py-3 text-sm text-gray-600 font-mono">{{ doc.processing_model or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<!-- Conversazione -->
+<div class="bg-white rounded-lg shadow">
+    <div class="px-6 py-4 border-b border-gray-200">
+        <h3 class="text-lg font-semibold text-gray-800">Conversazione ({{ messages|length }} messaggi)</h3>
+    </div>
+    <div class="p-6 max-h-[600px] overflow-y-auto space-y-4">
+        {% if messages %}
+        {% for msg in messages %}
+        <div class="flex {{ 'justify-end' if msg.role == 'user' else 'justify-start' }}">
+            <div class="max-w-[70%] rounded-lg px-4 py-3 {{ 'bg-blue-100 text-blue-900' if msg.role == 'user' else 'bg-gray-100 text-gray-800' }}">
+                <div class="flex items-center space-x-2 mb-1">
+                    <span class="text-xs font-semibold uppercase {{ 'text-blue-600' if msg.role == 'user' else 'text-gray-500' }}">{{ msg.role }}</span>
+                    <span class="text-xs text-gray-400">{{ msg.created_at|datetime }}</span>
+                    {% if msg.state_at_send %}
+                    <span class="text-xs text-gray-400">[{{ msg.state_at_send }}]</span>
+                    {% endif %}
+                </div>
+                <p class="text-sm whitespace-pre-wrap">{{ msg.content }}</p>
+            </div>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="text-sm text-gray-500 text-center">Nessun messaggio.</p>
+        {% endif %}
+    </div>
+</div>
+
+{% endif %}
+{% endblock %}

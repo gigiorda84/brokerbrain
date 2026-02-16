@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Log Audit - BrokerBot Admin{% endblock %}
+
+{% block content %}
+<h2 class="text-2xl font-bold text-gray-800 mb-6">Log Audit</h2>
+
+<!-- Filter -->
+<div class="bg-white rounded-lg shadow mb-6 p-4">
+    <form class="flex items-end gap-4" action="/admin/audit" method="get">
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Tipo evento</label>
+            <select name="event_type" class="rounded-md border-gray-300 shadow-sm text-sm px-3 py-2 border focus:ring-blue-500 focus:border-blue-500">
+                <option value="">Tutti</option>
+                <option value="session.started" {{ 'selected' if event_type == 'session.started' }}>session.started</option>
+                <option value="session.completed" {{ 'selected' if event_type == 'session.completed' }}>session.completed</option>
+                <option value="session.abandoned" {{ 'selected' if event_type == 'session.abandoned' }}>session.abandoned</option>
+                <option value="session.state_changed" {{ 'selected' if event_type == 'session.state_changed' }}>session.state_changed</option>
+                <option value="ocr.completed" {{ 'selected' if event_type == 'ocr.completed' }}>ocr.completed</option>
+                <option value="ocr.failed" {{ 'selected' if event_type == 'ocr.failed' }}>ocr.failed</option>
+                <option value="eligibility.checked" {{ 'selected' if event_type == 'eligibility.checked' }}>eligibility.checked</option>
+                <option value="llm.error" {{ 'selected' if event_type == 'llm.error' }}>llm.error</option>
+                <option value="system.error" {{ 'selected' if event_type == 'system.error' }}>system.error</option>
+                <option value="admin.access" {{ 'selected' if event_type == 'admin.access' }}>admin.access</option>
+                <option value="gdpr.deletion_requested" {{ 'selected' if event_type == 'gdpr.deletion_requested' }}>gdpr.deletion_requested</option>
+            </select>
+        </div>
+        <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm hover:bg-blue-700">Filtra</button>
+    </form>
+</div>
+
+<!-- Audit table -->
+<div class="bg-white rounded-lg shadow">
+    <div class="px-6 py-3 border-b border-gray-200">
+        <span class="text-sm text-gray-500">{{ total }} eventi &mdash; Pagina {{ page }} di {{ total_pages }}</span>
+    </div>
+
+    {% if logs %}
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Timestamp</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tipo evento</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Sessione</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Attore</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Dati</th>
+            </tr>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-200">
+            {% for log in logs %}
+            <tr class="hover:bg-gray-50">
+                <td class="px-6 py-3 text-sm text-gray-600 whitespace-nowrap">{{ log.created_at|datetime }}</td>
+                <td class="px-6 py-3 text-sm">
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
+                        {% if 'error' in log.event_type %}bg-red-100 text-red-800
+                        {% elif 'completed' in log.event_type %}bg-green-100 text-green-800
+                        {% elif 'started' in log.event_type %}bg-blue-100 text-blue-800
+                        {% else %}bg-gray-100 text-gray-800{% endif %}">{{ log.event_type }}</span>
+                </td>
+                <td class="px-6 py-3 text-sm font-mono text-gray-600">
+                    {% if log.session_id %}
+                    <a href="/admin/session/{{ log.session_id|string|truncate(8, True, '') }}" class="text-blue-600 hover:text-blue-800">{{ log.session_id|string|truncate(8, True, '') }}</a>
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td class="px-6 py-3 text-sm text-gray-600">{{ log.actor_id or '-' }}{% if log.actor_role %} <span class="text-gray-400">({{ log.actor_role }})</span>{% endif %}</td>
+                <td class="px-6 py-3 text-sm text-gray-600">
+                    {% if log.data %}
+                    <details>
+                        <summary class="cursor-pointer text-blue-600 hover:text-blue-800 text-xs">Mostra</summary>
+                        <pre class="mt-2 text-xs bg-gray-50 rounded p-2 max-w-md overflow-auto">{{ log.data|tojson(indent=2) }}</pre>
+                    </details>
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <!-- Pagination -->
+    {% if total_pages > 1 %}
+    <div class="px-6 py-4 border-t border-gray-200 flex justify-between items-center">
+        <div class="flex space-x-1">
+            {% if page > 1 %}
+            <a href="/admin/audit?page={{ page - 1 }}&event_type={{ event_type }}"
+               class="px-3 py-2 text-sm rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50">Prec.</a>
+            {% endif %}
+            {% for p in pages %}
+            <a href="/admin/audit?page={{ p }}&event_type={{ event_type }}"
+               class="px-3 py-2 text-sm rounded-md border {{ 'bg-blue-600 text-white border-blue-600' if p == page else 'border-gray-300 text-gray-700 hover:bg-gray-50' }}">{{ p }}</a>
+            {% endfor %}
+            {% if page < total_pages %}
+            <a href="/admin/audit?page={{ page + 1 }}&event_type={{ event_type }}"
+               class="px-3 py-2 text-sm rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50">Succ.</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% else %}
+    <div class="p-6 text-center text-gray-500 text-sm">Nessun evento trovato.</div>
+    {% endif %}
+</div>
+{% endblock %}

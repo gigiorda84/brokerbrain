@@ -1,0 +1,32 @@
+{% if active_sessions %}
+<table class="min-w-full divide-y divide-gray-200">
+    <thead class="bg-gray-50">
+        <tr>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ID</th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Utente</th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stato</th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tipo impiego</th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Durata</th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase"></th>
+        </tr>
+    </thead>
+    <tbody class="bg-white divide-y divide-gray-200">
+        {% for s in active_sessions %}
+        <tr class="hover:bg-gray-50">
+            <td class="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-600">{{ s.id|string|truncate(8, True, '') }}</td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-800">{{ s.user.first_name if s.user and s.user.first_name else '-' }}</td>
+            <td class="px-6 py-4 whitespace-nowrap">
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">{{ s.current_state }}</span>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{{ s.employment_type or '-' }}</td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{{ s.started_at|duration }}</td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm">
+                <a href="/admin/session/{{ s.id|string|truncate(8, True, '') }}" class="text-blue-600 hover:text-blue-800">Dettaglio</a>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="p-6 text-center text-gray-500 text-sm">Nessuna sessione attiva.</div>
+{% endif %}

@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Stato Sistema - BrokerBot Admin{% endblock %}
+
+{% block content %}
+<h2 class="text-2xl font-bold text-gray-800 mb-6">Stato Sistema</h2>
+
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+    <!-- Ollama -->
+    <div class="bg-white rounded-lg shadow p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-gray-800">Ollama</h3>
+            {% if health.ollama.status == 'ok' %}
+            <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800">OK</span>
+            {% else %}
+            <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800">Errore</span>
+            {% endif %}
+        </div>
+        {% if health.ollama.status == 'ok' %}
+        <div class="space-y-3">
+            <div class="flex justify-between text-sm">
+                <span class="text-gray-600">Latenza</span>
+                <span class="font-semibold">{{ health.ollama.latency_ms }}ms</span>
+            </div>
+            <div>
+                <p class="text-sm text-gray-600 mb-1">Modelli caricati:</p>
+                {% if health.ollama.models %}
+                <ul class="space-y-1">
+                    {% for model in health.ollama.models %}
+                    <li class="text-sm font-mono text-gray-700 bg-gray-50 rounded px-2 py-1">{{ model }}</li>
+                    {% endfor %}
+                </ul>
+                {% else %}
+                <p class="text-sm text-gray-400">Nessun modello</p>
+                {% endif %}
+            </div>
+        </div>
+        {% else %}
+        <p class="text-sm text-red-600">{{ health.ollama.error }}</p>
+        {% endif %}
+    </div>
+
+    <!-- PostgreSQL -->
+    <div class="bg-white rounded-lg shadow p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-gray-800">PostgreSQL</h3>
+            {% if health.postgresql.status == 'ok' %}
+            <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800">OK</span>
+            {% else %}
+            <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800">Errore</span>
+            {% endif %}
+        </div>
+        {% if health.postgresql.status == 'ok' %}
+        <div class="flex justify-between text-sm">
+            <span class="text-gray-600">Latenza</span>
+            <span class="font-semibold">{{ health.postgresql.latency_ms }}ms</span>
+        </div>
+        {% else %}
+        <p class="text-sm text-red-600">{{ health.postgresql.error }}</p>
+        {% endif %}
+    </div>
+
+    <!-- Redis -->
+    <div class="bg-white rounded-lg shadow p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-gray-800">Redis</h3>
+            {% if health.redis.status == 'ok' %}
+            <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800">OK</span>
+            {% else %}
+            <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800">Errore</span>
+            {% endif %}
+        </div>
+        {% if health.redis.status == 'ok' %}
+        <div class="flex justify-between text-sm">
+            <span class="text-gray-600">Latenza</span>
+            <span class="font-semibold">{{ health.redis.latency_ms }}ms</span>
+        </div>
+        {% else %}
+        <p class="text-sm text-red-600">{{ health.redis.error }}</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

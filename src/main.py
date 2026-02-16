@@ -18,6 +18,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from src.admin.events import start_event_system, stop_event_system, subscribe
+from src.admin.web import router as admin_router
 from src.channels.telegram import create_telegram_app
 from src.config import settings
 from src.db.engine import db_lifespan
@@ -122,6 +123,8 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+app.include_router(admin_router)
 
 
 @app.get("/health")
