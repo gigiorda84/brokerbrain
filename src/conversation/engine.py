@@ -12,6 +12,7 @@ import logging
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
+import redis.asyncio as aioredis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -34,11 +35,12 @@ from src.conversation.prompts.result import RESULT_PROMPT
 from src.conversation.prompts.scheduling import SCHEDULING_PROMPT
 from src.conversation.prompts.track_choice import TRACK_CHOICE_PROMPT
 from src.conversation.prompts.welcome import WELCOME_PROMPT
+from src.db.engine import redis_client as _redis
 from src.decoders.codice_fiscale import decode_cf
 from src.eligibility.engine import match_products
 from src.llm.client import llm_client
 from src.models.calculation import CdQCalculation, DTICalculation
-from src.models.enums import ConversationState, DataSource, LiabilityType, MessageRole
+from src.models.enums import ConversationState, DataSource, LiabilityType, MessageRole, SessionOutcome
 from src.models.extracted_data import ExtractedData
 from src.models.liability import Liability
 from src.models.message import Message
@@ -46,7 +48,8 @@ from src.models.product_match import ProductMatch
 from src.models.session import Session as SessionModel
 from src.models.user import User
 from src.ocr.pipeline import process_document
-from src.schemas.eligibility import LiabilitySnapshot, UserProfile
+from src.schemas.calculators import DtiResult
+from src.schemas.eligibility import EligibilityResult, LiabilitySnapshot, UserProfile
 from src.schemas.events import EventType, SystemEvent
 from src.security.encryption import field_encryptor
 
@@ -332,6 +335,162 @@ def _build_user_profile(session: SessionModel) -> UserProfile:
     )
 
 
+# ── Redis message cache ──────────────────────────────────────────────
+# Cache last N messages per session to avoid DB queries on every message.
+# Key: "session:{session_id}:messages", TTL: 1 hour, max 10 entries.
+
+_MSG_CACHE_LIMIT = 10
+_MSG_CACHE_TTL = 3600  # 1 hour
+
+
+def _msg_cache_key(session_id: object) -> str:
+    return f"session:{session_id}:messages"
+
+
+async def _get_cached_messages(redis: aioredis.Redis, session_id: object) -> list[dict[str, str]] | None:
+    """Get cached LLM message history from Redis. Returns None on cache miss."""
+    key = _msg_cache_key(session_id)
+    raw = await redis.lrange(key, 0, -1)
+    if not raw:
+        return None
+    return [json.loads(item) for item in raw]
+
+
+async def _push_cached_message(redis: aioredis.Redis, session_id: object, role: str, content: str) -> None:
+    """Append a message to the Redis cache and trim to limit."""
+    key = _msg_cache_key(session_id)
+    entry = json.dumps({"role": role, "content": content})
+    pipe = redis.pipeline()
+    pipe.rpush(key, entry)
+    pipe.ltrim(key, -_MSG_CACHE_LIMIT, -1)
+    pipe.expire(key, _MSG_CACHE_TTL)
+    await pipe.execute()
+
+
+async def _seed_cache_from_db(
+    redis: aioredis.Redis, db: AsyncSession, session_id: object
+) -> list[dict[str, str]]:
+    """Load messages from DB into Redis cache on first access. Returns LLM-formatted messages."""
+    result = await db.execute(
+        select(Message)
+        .where(Message.session_id == session_id)
+        .order_by(Message.created_at.desc())
+        .limit(_MSG_CACHE_LIMIT)
+    )
+    recent_messages = list(reversed(result.scalars().all()))
+
+    llm_messages: list[dict[str, str]] = []
+    pipe = redis.pipeline()
+    key = _msg_cache_key(session_id)
+    pipe.delete(key)
+    for msg in recent_messages:
+        if msg.role == MessageRole.SYSTEM.value:
+            continue
+        role = "user" if msg.role == MessageRole.USER.value else "assistant"
+        entry = {"role": role, "content": msg.content}
+        llm_messages.append(entry)
+        pipe.rpush(key, json.dumps(entry))
+    pipe.expire(key, _MSG_CACHE_TTL)
+    await pipe.execute()
+    return llm_messages
+
+
+def _format_euro(amount: Decimal) -> str:
+    """Format a Decimal as Italian currency: €1.750,00"""
+    abs_val = abs(amount)
+    integer_part = int(abs_val)
+    decimal_part = abs_val - integer_part
+    cents = round(decimal_part * 100)
+    int_str = f"{integer_part:,}".replace(",", ".")
+    return f"\u20ac{int_str},{cents:02d}"
+
+
+def _format_result_response(
+    result: EligibilityResult,
+    eligible_products: list[str],
+    dti: DtiResult,
+) -> str:
+    """Build a deterministic Italian result message from eligibility data.
+
+    Replaces the second LLM call in _handle_calculating — no latency,
+    consistent formatting, and the user still gets a natural presentation.
+    """
+    parts: list[str] = []
+
+    if eligible_products:
+        parts.append("Ecco i risultati della sua verifica preliminare!")
+        parts.append("")
+        parts.append("**Prodotti disponibili:**")
+        parts.append("")
+        rank = 1
+        for match in sorted(result.matches, key=lambda m: m.rank or 99):
+            if not match.eligible:
+                continue
+            line = f"{rank}. **{match.product_name}**"
+            if match.sub_type:
+                line += f" ({match.sub_type})"
+            if match.estimated_terms:
+                terms_parts: list[str] = []
+                if match.estimated_terms.max_installment:
+                    terms_parts.append(
+                        f"rata max {_format_euro(match.estimated_terms.max_installment)}/mese"
+                    )
+                if match.estimated_terms.max_duration_months:
+                    terms_parts.append(f"fino a {match.estimated_terms.max_duration_months} mesi")
+                if match.estimated_terms.estimated_amount_max:
+                    terms_parts.append(
+                        f"importo fino a {_format_euro(match.estimated_terms.estimated_amount_max)}"
+                    )
+                if terms_parts:
+                    line += " — " + ", ".join(terms_parts)
+            parts.append(line)
+            rank += 1
+    else:
+        parts.append("Purtroppo, in base ai dati forniti, al momento non risultano prodotti disponibili.")
+
+    # Ineligible products brief mention
+    ineligible = [m for m in result.matches if not m.eligible and m.ineligibility_reason]
+    if ineligible:
+        parts.append("")
+        for m in ineligible:
+            parts.append(f"- {m.product_name}: {m.ineligibility_reason}")
+
+    # Smart suggestions
+    if result.suggestions:
+        parts.append("")
+        for s in result.suggestions:
+            parts.append(f"\U0001f4a1 {s.description}")
+
+    # Disclaimer
+    parts.append("")
+    parts.append(
+        "\u26a0\ufe0f Questa \u00e8 una verifica preliminare e non costituisce un'offerta vincolante. "
+        "La valutazione definitiva sar\u00e0 effettuata da un consulente di Primo Network Srl."
+    )
+
+    # Next step
+    parts.append("")
+    parts.append(
+        "Desidera fissare un appuntamento con un nostro consulente per approfondire? "
+        "Oppure le bastano queste informazioni per ora?"
+    )
+
+    return "\n".join(parts)
+
+
+def _determine_outcome(session: SessionModel) -> tuple[str, str | None]:
+    """Determine session outcome from state and eligibility results."""
+    if session.current_state == ConversationState.HUMAN_ESCALATION.value:
+        return SessionOutcome.HUMAN_ESCALATION.value, None
+
+    # Check if any products were eligible
+    eligible = [pm for pm in session.product_matches if pm.eligible]
+    if not eligible:
+        return SessionOutcome.NOT_ELIGIBLE.value, "Nessun prodotto idoneo"
+
+    return SessionOutcome.QUALIFIED.value, None
+
+
 class ConversationEngine:
     """Orchestrates the conversation flow for all sessions."""
 
@@ -378,7 +537,6 @@ class ConversationEngine:
                 selectinload(SessionModel.extracted_data),
                 selectinload(SessionModel.liabilities),
                 selectinload(SessionModel.product_matches),
-                selectinload(SessionModel.messages),
             )
             .order_by(SessionModel.created_at.desc())
             .limit(1)
@@ -395,7 +553,7 @@ class ConversationEngine:
             await db.flush()
             # Reload session with all selectin relationships eagerly loaded
             await db.refresh(session, attribute_names=[
-                "extracted_data", "liabilities", "product_matches", "messages",
+                "extracted_data", "liabilities", "product_matches",
             ])
 
             await emit(SystemEvent(
@@ -436,14 +594,18 @@ class ConversationEngine:
         session = await self.get_or_create_session(db, user)
 
         # 2. Save incoming message
+        msg_content = text or "[documento inviato]"
         user_msg = Message(
             session_id=session.id,
             role=MessageRole.USER.value,
-            content=text or "[documento inviato]",
+            content=msg_content,
             state_at_send=session.current_state,
         )
         db.add(user_msg)
         await db.flush()
+
+        # Push user message to Redis cache
+        await _push_cached_message(_redis, session.id, "user", msg_content)
 
         await emit(SystemEvent(
             event_type=EventType.MESSAGE_RECEIVED,
@@ -483,31 +645,20 @@ class ConversationEngine:
         if context_section:
             system_prompt = system_prompt + "\n" + context_section
 
-        # 7. Load recent conversation history for context
-        result = await db.execute(
-            select(Message)
-            .where(Message.session_id == session.id)
-            .order_by(Message.created_at.desc())
-            .limit(20)
-        )
-        recent_messages = list(reversed(result.scalars().all()))
+        # 7. Load recent conversation history (Redis cache → DB fallback)
+        llm_messages = await _get_cached_messages(_redis, session.id)
+        if llm_messages is None:
+            llm_messages = await _seed_cache_from_db(_redis, db, session.id)
 
-        # Build messages list for LLM
-        llm_messages: list[dict[str, str]] = []
-        for msg in recent_messages:
-            if msg.role == MessageRole.SYSTEM.value:
-                continue
-            llm_messages.append({
-                "role": "user" if msg.role == MessageRole.USER.value else "assistant",
-                "content": msg.content,
-            })
-
-        # 8. Call LLM
+        # 8. Call LLM (streaming — collects full response but gets first token faster)
         try:
-            raw_response = await llm_client.chat(
+            chunks: list[str] = []
+            async for token in llm_client.chat_stream(
                 system_prompt=system_prompt,
                 messages=llm_messages,
-            )
+            ):
+                chunks.append(token)
+            raw_response = "".join(chunks)
         except Exception:
             logger.exception("LLM call failed for session %s", session.id)
             raw_response = (
@@ -528,8 +679,12 @@ class ConversationEngine:
         new_state = ConversationState(session.current_state)
         if new_state == ConversationState.CALCULATING:
             calc_response = await self._handle_calculating(db, session, user, fsm)
-            # Append calculation results to response
             response_text = response_text + "\n\n" + calc_response
+
+        # 12. If we just transitioned to a terminal state, finalize
+        if new_state in (ConversationState.COMPLETED, ConversationState.HUMAN_ESCALATION):
+            trigger = action.get("trigger") if action else None
+            await self._handle_session_completed(db, session, user, trigger=trigger)
 
         return await self._save_and_return(db, session, user, response_text)
 
@@ -597,6 +752,9 @@ class ConversationEngine:
         )
         db.add(bot_msg)
 
+        # Push bot response to Redis message cache
+        await _push_cached_message(_redis, session.id, "assistant", response_text)
+
         session.message_count = (session.message_count or 0) + 2
 
         await emit(SystemEvent(
@@ -643,7 +801,7 @@ class ConversationEngine:
         3. Calculate DTI → persist DTICalculation
         4. Calculate CdQ capacity → persist CdQCalculation (if applicable)
         5. Transition CALCULATING → RESULT
-        6. Call LLM with RESULT_PROMPT + eligibility context
+        6. Return deterministic Italian template (no LLM call — saves 5-10s)
         """
         profile = _build_user_profile(session)
         eligibility_result = match_products(profile)
@@ -766,40 +924,58 @@ class ConversationEngine:
 
         await db.flush()
 
-        # Now call LLM with RESULT_PROMPT to generate Italian response
-        context_section = _build_context_section(session)
-        result_prompt = RESULT_PROMPT
-        if context_section:
-            result_prompt = result_prompt + "\n" + context_section
+        # Build deterministic Italian response from calculation results (no LLM call)
+        return _format_result_response(eligibility_result, eligible_products, dti_result)
 
+    async def _handle_session_completed(
+        self,
+        db: AsyncSession,
+        session: SessionModel,
+        user: User,
+        trigger: str | None = None,
+    ) -> None:
+        """Finalize a completed session: outcome, dossier, events, cleanup."""
+        from src.dossier.builder import build_dossier, load_session_for_dossier
+        from src.dossier.quotation import persist_quotation_forms
+
+        # 1. Set outcome
+        outcome, reason = _determine_outcome(session)
+        if trigger == "booked":
+            outcome = SessionOutcome.SCHEDULED.value
+        session.outcome = outcome
+        session.outcome_reason = reason
+        session.completed_at = datetime.now(UTC)
+
+        # 2. Build and persist dossier (only for qualified/scheduled)
+        if outcome in (SessionOutcome.QUALIFIED.value, SessionOutcome.SCHEDULED.value):
+            try:
+                full_session = await load_session_for_dossier(db, str(session.id))
+                if full_session:
+                    dossier = build_dossier(full_session)
+                    await persist_quotation_forms(db, dossier)
+            except Exception:
+                logger.exception("Failed to build dossier for session %s", session.id)
+
+        # 3. Emit SESSION_COMPLETED event
+        await emit(SystemEvent(
+            event_type=EventType.SESSION_COMPLETED,
+            session_id=session.id,
+            user_id=user.id,
+            data={
+                "outcome": outcome,
+                "outcome_reason": reason,
+                "message_count": session.message_count,
+            },
+            source_module="conversation.engine",
+        ))
+
+        # 4. Clean up Redis message cache
         try:
-            raw_response = await llm_client.chat(
-                system_prompt=result_prompt,
-                messages=[{
-                    "role": "user",
-                    "content": "Mostrami i risultati della verifica.",
-                }],
-            )
+            await _redis.delete(_msg_cache_key(session.id))
         except Exception:
-            logger.exception("LLM call failed for RESULT state (session %s)", session.id)
-            eligible_names = ", ".join(eligible_products) if eligible_products else "nessuno"
-            raw_response = (
-                f"Ecco i risultati: prodotti disponibili: {eligible_names}.\n\n"
-                "⚠️ Questa è una verifica preliminare. "
-                "Contatti il numero verde 800.99.00.90 per una consulenza personalizzata.\n"
-                "---\n"
-                '{"action": "clarify", "reason": "presenting_results"}'
-            )
+            logger.warning("Failed to clean Redis cache for session %s", session.id)
 
-        response_text, action = parse_llm_response(raw_response)
-
-        # Handle any action from the RESULT prompt
-        if action is not None:
-            result_state = ConversationState(session.current_state)
-            result_fsm = FSM(session_id=session.id, initial_state=result_state)
-            await self._handle_action(db, session, result_fsm, result_state, action)
-
-        return response_text
+        await db.flush()
 
     async def _handle_doc_processing(
         self,
