@@ -47,9 +47,11 @@ class LLMSettings(BaseSettings):
         default="qwen2.5-vl:7b-q4_K_M",
         description="Model for OCR (Qwen2.5-VL 7B)",
     )
-    conversation_timeout: int = Field(default=90, description="Conversation LLM timeout in seconds")
-    ocr_timeout: int = Field(default=60, description="OCR LLM timeout in seconds")
-    keep_alive: str = Field(default="5m", description="Ollama keep_alive parameter")
+    conversation_timeout: int = Field(default=30, description="Conversation LLM timeout in seconds")
+    ocr_timeout: int = Field(default=120, description="OCR LLM timeout in seconds (includes model swap)")
+    keep_alive: str = Field(default="-1m", description="Ollama keep_alive parameter (-1m = never unload)")
+    conversation_max_tokens: int = Field(default=400, description="Max tokens for conversation responses")
+    ocr_max_tokens: int = Field(default=600, description="Max tokens for OCR extraction responses")
 
 
 class TelegramSettings(BaseSettings):

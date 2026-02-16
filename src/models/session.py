@@ -16,10 +16,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, TimestampMixin
 from src.models.enums import (
     ConversationState,
-    EmployerCategory,
-    EmploymentType,
-    PensionSource,
-    SessionOutcome,
 )
 
 if TYPE_CHECKING:
@@ -68,28 +64,22 @@ class Session(TimestampMixin, Base):
     message_count: Mapped[int] = mapped_column(Integer, default=0)
 
     # Relationships
+    # Core data needed by conversation engine — eager load via selectin
     user: Mapped[User] = relationship("User", back_populates="sessions")
-    messages: Mapped[list[Message]] = relationship("Message", back_populates="session", lazy="selectin")
-    documents: Mapped[list[Document]] = relationship("Document", back_populates="session", lazy="selectin")
     extracted_data: Mapped[list[ExtractedData]] = relationship(
         "ExtractedData", back_populates="session", lazy="selectin"
     )
     liabilities: Mapped[list[Liability]] = relationship("Liability", back_populates="session", lazy="selectin")
-    dti_calculations: Mapped[list[DTICalculation]] = relationship(
-        "DTICalculation", back_populates="session", lazy="selectin"
-    )
-    cdq_calculations: Mapped[list[CdQCalculation]] = relationship(
-        "CdQCalculation", back_populates="session", lazy="selectin"
-    )
     product_matches: Mapped[list[ProductMatch]] = relationship(
         "ProductMatch", back_populates="session", lazy="selectin"
     )
-    quotation_data: Mapped[list[QuotationData]] = relationship(
-        "QuotationData", back_populates="session", lazy="selectin"
-    )
-    appointments: Mapped[list[Appointment]] = relationship(
-        "Appointment", back_populates="session", lazy="selectin"
-    )
+    # Rarely accessed relationships — lazy load (explicit selectinload when needed)
+    messages: Mapped[list[Message]] = relationship("Message", back_populates="session")
+    documents: Mapped[list[Document]] = relationship("Document", back_populates="session")
+    dti_calculations: Mapped[list[DTICalculation]] = relationship("DTICalculation", back_populates="session")
+    cdq_calculations: Mapped[list[CdQCalculation]] = relationship("CdQCalculation", back_populates="session")
+    quotation_data: Mapped[list[QuotationData]] = relationship("QuotationData", back_populates="session")
+    appointments: Mapped[list[Appointment]] = relationship("Appointment", back_populates="session")
 
     def __repr__(self) -> str:
         return f"<Session id={self.id} state={self.current_state} outcome={self.outcome}>"

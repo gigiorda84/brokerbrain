@@ -1,14 +1,17 @@
 """Ollama LLM client with model-swapping for 16GB RAM constraint.
 
-Wraps Ollama's OpenAI-compatible API. Tracks the currently loaded model
-and handles swapping between conversation (Qwen3 8B) and vision (Qwen2.5-VL 7B).
+Uses Ollama's native /api/chat endpoint (not OpenAI-compat) so we can
+disable Qwen3's thinking mode via think=false. Tracks the currently loaded
+model and handles swapping between conversation and vision models.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import httpx
@@ -21,10 +24,12 @@ logger = logging.getLogger(__name__)
 
 
 class OllamaClient:
-    """Async client for Ollama's OpenAI-compatible chat API.
+    """Async client for Ollama's native /api/chat endpoint.
 
     On 16GB M2: only one model fits in memory at a time. The client
     tracks which model is loaded and handles swapping via keep_alive.
+    Uses think=false to disable Qwen3's chain-of-thought reasoning,
+    which wastes tokens and dramatically slows responses.
     """
 
     def __init__(self) -> None:
@@ -85,21 +90,27 @@ class OllamaClient:
         messages: list[dict[str, str]],
         model: str | None = None,
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: int | None = None,
     ) -> str:
-        """Send a chat completion request to Ollama.
+        """Send a chat request to Ollama's native API (non-streaming, no thinking).
 
         Args:
             system_prompt: System-level instructions for the LLM.
             messages: List of {"role": "user"|"assistant", "content": "..."}.
             model: Model name override. Defaults to conversation model.
             temperature: Sampling temperature.
-            max_tokens: Max response tokens.
+            max_tokens: Max response tokens. Defaults to config value.
 
         Returns:
             The LLM's text response.
         """
         model = model or settings.llm.conversation_model
+        if max_tokens is None:
+            max_tokens = (
+                settings.llm.ocr_max_tokens
+                if model == settings.llm.vision_model
+                else settings.llm.conversation_max_tokens
+            )
         await self.ensure_model(model)
 
         timeout = (
@@ -129,13 +140,16 @@ class OllamaClient:
         start = time.monotonic()
         try:
             response = await self._client.post(
-                "/v1/chat/completions",
+                "/api/chat",
                 json={
                     "model": model,
                     "messages": api_messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
                     "stream": False,
+                    "think": False,
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": max_tokens,
+                    },
                 },
                 timeout=float(timeout),
             )
@@ -143,16 +157,17 @@ class OllamaClient:
             data: dict[str, Any] = response.json()
             elapsed_ms = int((time.monotonic() - start) * 1000)
 
-            content: str = data["choices"][0]["message"]["content"]
-            usage = data.get("usage", {})
+            content: str = data["message"]["content"]
+            prompt_tokens = data.get("prompt_eval_count", 0)
+            completion_tokens = data.get("eval_count", 0)
 
             await emit(SystemEvent(
                 event_type=EventType.LLM_RESPONSE,
                 data={
                     "model": model,
                     "latency_ms": elapsed_ms,
-                    "prompt_tokens": usage.get("prompt_tokens", 0),
-                    "completion_tokens": usage.get("completion_tokens", 0),
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
                 },
                 source_module="llm.client",
             ))
@@ -161,7 +176,7 @@ class OllamaClient:
                 "LLM response: model=%s latency=%dms tokens=%d",
                 model,
                 elapsed_ms,
-                usage.get("completion_tokens", 0),
+                completion_tokens,
             )
             return content
 
@@ -184,6 +199,133 @@ class OllamaClient:
             logger.exception("LLM HTTP error for model %s", model)
             raise
 
+    async def chat_stream(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, str]],
+        model: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """Send a streaming chat request to Ollama's native API (no thinking).
+
+        Yields text chunks as they arrive. Uses /api/chat with stream=true
+        and think=false to disable Qwen3's chain-of-thought reasoning.
+
+        Args:
+            system_prompt: System-level instructions for the LLM.
+            messages: List of {"role": "user"|"assistant", "content": "..."}.
+            model: Model name override. Defaults to conversation model.
+            temperature: Sampling temperature.
+            max_tokens: Max response tokens. Defaults to config value.
+
+        Yields:
+            Text chunks as they are generated.
+        """
+        model = model or settings.llm.conversation_model
+        if max_tokens is None:
+            max_tokens = (
+                settings.llm.ocr_max_tokens
+                if model == settings.llm.vision_model
+                else settings.llm.conversation_max_tokens
+            )
+        await self.ensure_model(model)
+
+        timeout = (
+            settings.llm.ocr_timeout
+            if model == settings.llm.vision_model
+            else settings.llm.conversation_timeout
+        )
+
+        api_messages: list[dict[str, str]] = [
+            {"role": "system", "content": system_prompt},
+            *messages,
+        ]
+
+        prompt_hash = hashlib.md5(system_prompt.encode()).hexdigest()[:8]
+
+        await emit(SystemEvent(
+            event_type=EventType.LLM_REQUEST,
+            data={
+                "model": model,
+                "prompt_hash": prompt_hash,
+                "message_count": len(messages),
+                "streaming": True,
+            },
+            source_module="llm.client",
+        ))
+
+        start = time.monotonic()
+        full_content = ""
+        try:
+            # Ollama /api/chat streams newline-delimited JSON (not SSE)
+            async with self._client.stream(
+                "POST",
+                "/api/chat",
+                json={
+                    "model": model,
+                    "messages": api_messages,
+                    "stream": True,
+                    "think": False,
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": max_tokens,
+                    },
+                },
+                timeout=float(timeout),
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                        if chunk.get("done"):
+                            break
+                        token = chunk.get("message", {}).get("content", "")
+                        if token:
+                            full_content += token
+                            yield token
+                    except json.JSONDecodeError:
+                        continue
+
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            await emit(SystemEvent(
+                event_type=EventType.LLM_RESPONSE,
+                data={
+                    "model": model,
+                    "latency_ms": elapsed_ms,
+                    "streaming": True,
+                    "total_chars": len(full_content),
+                },
+                source_module="llm.client",
+            ))
+            logger.info(
+                "LLM stream complete: model=%s latency=%dms chars=%d",
+                model,
+                elapsed_ms,
+                len(full_content),
+            )
+
+        except httpx.TimeoutException:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            await emit(SystemEvent(
+                event_type=EventType.LLM_ERROR,
+                data={"model": model, "error": "timeout", "latency_ms": elapsed_ms, "streaming": True},
+                source_module="llm.client",
+            ))
+            logger.error("LLM stream timeout after %dms for model %s", elapsed_ms, model)
+            raise
+
+        except httpx.HTTPError as exc:
+            await emit(SystemEvent(
+                event_type=EventType.LLM_ERROR,
+                data={"model": model, "error": str(exc), "streaming": True},
+                source_module="llm.client",
+            ))
+            logger.exception("LLM stream HTTP error for model %s", model)
+            raise
+
     async def chat_vision(
         self,
         system_prompt: str,
@@ -191,9 +333,9 @@ class OllamaClient:
         image_base64: str,
         model: str | None = None,
         temperature: float = 0.1,
-        max_tokens: int = 1000,
+        max_tokens: int | None = None,
     ) -> str:
-        """Send a vision chat request with an image to Ollama.
+        """Send a vision chat request with an image to Ollama's native API.
 
         Args:
             system_prompt: System-level instructions for the VLM.
@@ -201,27 +343,25 @@ class OllamaClient:
             image_base64: Base64-encoded image data.
             model: Model name override. Defaults to vision model.
             temperature: Sampling temperature (low for OCR).
-            max_tokens: Max response tokens.
+            max_tokens: Max response tokens. Defaults to config value.
 
         Returns:
             The VLM's text response.
         """
         model = model or settings.llm.vision_model
+        if max_tokens is None:
+            max_tokens = settings.llm.ocr_max_tokens
         await self.ensure_model(model)
 
         timeout = settings.llm.ocr_timeout
 
+        # Ollama native API uses "images" field on the user message
         api_messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
-                    },
-                    {"type": "text", "text": text_prompt},
-                ],
+                "content": text_prompt,
+                "images": [image_base64],
             },
         ]
 
@@ -240,13 +380,16 @@ class OllamaClient:
         start = time.monotonic()
         try:
             response = await self._client.post(
-                "/v1/chat/completions",
+                "/api/chat",
                 json={
                     "model": model,
                     "messages": api_messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
                     "stream": False,
+                    "think": False,
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": max_tokens,
+                    },
                 },
                 timeout=float(timeout),
             )
@@ -254,16 +397,17 @@ class OllamaClient:
             data: dict[str, Any] = response.json()
             elapsed_ms = int((time.monotonic() - start) * 1000)
 
-            content: str = data["choices"][0]["message"]["content"]
-            usage = data.get("usage", {})
+            content: str = data["message"]["content"]
+            prompt_tokens = data.get("prompt_eval_count", 0)
+            completion_tokens = data.get("eval_count", 0)
 
             await emit(SystemEvent(
                 event_type=EventType.LLM_RESPONSE,
                 data={
                     "model": model,
                     "latency_ms": elapsed_ms,
-                    "prompt_tokens": usage.get("prompt_tokens", 0),
-                    "completion_tokens": usage.get("completion_tokens", 0),
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
                     "vision": True,
                 },
                 source_module="llm.client",
@@ -273,7 +417,7 @@ class OllamaClient:
                 "VLM response: model=%s latency=%dms tokens=%d",
                 model,
                 elapsed_ms,
-                usage.get("completion_tokens", 0),
+                completion_tokens,
             )
             return content
 

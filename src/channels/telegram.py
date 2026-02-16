@@ -6,9 +6,11 @@ and sends responses back to the user.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from telegram import Update
+from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -23,58 +25,76 @@ from src.db.engine import async_session_factory
 
 logger = logging.getLogger(__name__)
 
+# Interval between "typing..." indicator refreshes (Telegram typing expires after ~5s)
+_TYPING_INTERVAL = 4.0
+
+
+async def _send_typing_until_done(chat_id: int, bot: object, done_event: asyncio.Event) -> None:
+    """Send typing action every few seconds until the done event is set."""
+    while not done_event.is_set():
+        try:
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)  # type: ignore[union-attr]
+        except Exception:
+            break
+        try:
+            await asyncio.wait_for(done_event.wait(), timeout=_TYPING_INTERVAL)
+        except TimeoutError:
+            continue
+
+
+async def _process_with_typing(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    first_name: str | None,
+    image_bytes: bytes | None = None,
+) -> None:
+    """Process a message while showing a typing indicator to the user."""
+    assert update.effective_user is not None  # noqa: S101
+    assert update.message is not None  # noqa: S101
+
+    telegram_id = str(update.effective_user.id)
+    chat_id = update.message.chat_id
+
+    # Start typing indicator in background
+    done = asyncio.Event()
+    typing_task = asyncio.create_task(_send_typing_until_done(chat_id, context.bot, done))
+
+    try:
+        async with async_session_factory() as db:
+            response = await conversation_engine.process_message(
+                db=db,
+                telegram_id=telegram_id,
+                text=text,
+                first_name=first_name,
+                image_bytes=image_bytes,
+            )
+            await db.commit()
+    except Exception:
+        logger.exception("Error processing message from user %s", telegram_id)
+        response = (
+            "Mi scusi, si \u00e8 verificato un errore. "
+            "Riprovi tra qualche istante o chiami il 800.99.00.90."
+        )
+    finally:
+        done.set()
+        await typing_task
+
+    await update.message.reply_text(response)
+
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/start command — begin a new qualification conversation."""
     if update.effective_user is None or update.message is None:
         return
-
-    telegram_id = str(update.effective_user.id)
-    first_name = update.effective_user.first_name
-
-    async with async_session_factory() as db:
-        try:
-            response = await conversation_engine.process_message(
-                db=db,
-                telegram_id=telegram_id,
-                text="/start",
-                first_name=first_name,
-            )
-            await db.commit()
-            await update.message.reply_text(response)
-        except Exception:
-            logger.exception("Error processing /start for user %s", telegram_id)
-            await update.message.reply_text(
-                "Mi scusi, si è verificato un errore. "
-                "Riprovi tra qualche istante o chiami il 800.99.00.90."
-            )
+    await _process_with_typing(update, context, "/start", update.effective_user.first_name)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming text messages — route to conversation engine."""
     if update.effective_user is None or update.message is None or update.message.text is None:
         return
-
-    telegram_id = str(update.effective_user.id)
-    first_name = update.effective_user.first_name
-    text = update.message.text
-
-    async with async_session_factory() as db:
-        try:
-            response = await conversation_engine.process_message(
-                db=db,
-                telegram_id=telegram_id,
-                text=text,
-                first_name=first_name,
-            )
-            await db.commit()
-            await update.message.reply_text(response)
-        except Exception:
-            logger.exception("Error processing message from user %s", telegram_id)
-            await update.message.reply_text(
-                "Mi scusi, si è verificato un errore. "
-                "Riprovi tra qualche istante o chiami il 800.99.00.90."
-            )
+    await _process_with_typing(update, context, update.message.text, update.effective_user.first_name)
 
 
 async def handle_photo_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -83,7 +103,6 @@ async def handle_photo_document(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     telegram_id = str(update.effective_user.id)
-    first_name = update.effective_user.first_name
     text = update.message.caption or "[documento inviato]"
 
     try:
@@ -105,23 +124,9 @@ async def handle_photo_document(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
-    async with async_session_factory() as db:
-        try:
-            response = await conversation_engine.process_message(
-                db=db,
-                telegram_id=telegram_id,
-                text=text,
-                first_name=first_name,
-                image_bytes=image_bytes,
-            )
-            await db.commit()
-            await update.message.reply_text(response)
-        except Exception:
-            logger.exception("Error processing photo/document from user %s", telegram_id)
-            await update.message.reply_text(
-                "Mi scusi, si è verificato un errore. "
-                "Riprovi tra qualche istante o chiami il 800.99.00.90."
-            )
+    await _process_with_typing(
+        update, context, text, update.effective_user.first_name, image_bytes=image_bytes
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
