@@ -478,6 +478,16 @@ def _format_result_response(
     return "\n".join(parts)
 
 
+def _extract_scheduling_preferences(session: SessionModel) -> dict[str, str]:
+    """Pull scheduling preferences from session extracted data."""
+    prefs: dict[str, str] = {}
+    for key in ("preferred_time", "contact_method"):
+        value = _get_extracted_value(session, key)
+        if value:
+            prefs[key] = value
+    return prefs
+
+
 def _determine_outcome(session: SessionModel) -> tuple[str, str | None]:
     """Determine session outcome from state and eligibility results."""
     if session.current_state == ConversationState.HUMAN_ESCALATION.value:
@@ -942,6 +952,14 @@ class ConversationEngine:
         outcome, reason = _determine_outcome(session)
         if trigger == "booked":
             outcome = SessionOutcome.SCHEDULED.value
+            # Create appointment from scheduling preferences
+            from src.scheduling.service import scheduling_service
+
+            try:
+                preferences = _extract_scheduling_preferences(session)
+                await scheduling_service.create_appointment(db, session, user, preferences)
+            except Exception:
+                logger.exception("Failed to create appointment for session %s", session.id)
         session.outcome = outcome
         session.outcome_reason = reason
         session.completed_at = datetime.now(UTC)

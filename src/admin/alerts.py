@@ -111,6 +111,18 @@ ALERT_RULES: list[AlertRule] = [
         ),
         level="critical",
     ),
+    AlertRule(
+        name="Appuntamento richiesto",
+        event_types=[EventType.APPOINTMENT_BOOKED],
+        condition=lambda _: True,
+        template=(
+            "\U0001f4c5 <b>Nuovo appuntamento richiesto</b>\n"
+            "Operatore: {operator_name}\n"
+            "Orario preferito: {preferred_time}\n"
+            "Sessione: <code>{session_id}</code>"
+        ),
+        level="info",
+    ),
 ]
 
 

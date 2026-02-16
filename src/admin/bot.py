@@ -78,6 +78,8 @@ _EVENT_FORMATS: dict[EventType, str] = {
     EventType.SESSION_ABANDONED: "\U0001f6ab Sessione abbandonata",
     EventType.SESSION_ESCALATED: "\U0001f6a8 Escalation umana",
     EventType.LLM_RESPONSE: "\U0001f916 LLM risposta ({latency_ms}ms)",
+    EventType.APPOINTMENT_BOOKED: "\U0001f4c5 Appuntamento prenotato (operatore: {operator_name})",
+    EventType.APPOINTMENT_CANCELLED: "\u274c Appuntamento annullato",
 }
 
 
@@ -99,6 +101,8 @@ def _format_live_event(event: SystemEvent) -> str:
     ctx.setdefault("eligible_count", 0)
     ctx.setdefault("outcome", "?")
     ctx.setdefault("latency_ms", "?")
+    ctx.setdefault("operator_name", "non assegnato")
+    ctx.setdefault("preferred_time", "non specificato")
 
     try:
         return template.format(**ctx)
@@ -136,8 +140,10 @@ class AdminBot:
         self._app.add_handler(CommandHandler("live", self._cmd_live))
         self._app.add_handler(CommandHandler("unlive", self._cmd_unlive))
 
+        self._app.add_handler(CommandHandler("queue", self._cmd_queue))
+
         # Stub commands (Phase 2)
-        for stub in ("search", "queue", "dossier", "week", "alerts", "intervene", "config", "gdpr"):
+        for stub in ("search", "dossier", "week", "alerts", "intervene", "config", "gdpr"):
             self._app.add_handler(CommandHandler(stub, self._cmd_stub))
 
         await self._app.initialize()
@@ -219,9 +225,10 @@ class AdminBot:
             "/stats \u2014 KPI principali\n"
             "/errors \u2014 Errori recenti (24h)\n"
             "/live &lt;id&gt; \u2014 Segui sessione in tempo reale\n"
-            "/unlive &lt;id&gt; \u2014 Smetti di seguire\n\n"
+            "/unlive &lt;id&gt; \u2014 Smetti di seguire\n"
+            "/queue \u2014 Appuntamenti in coda\n\n"
             "<b>In arrivo:</b>\n"
-            "/search, /queue, /dossier, /week, /alerts, /intervene, /config, /gdpr"
+            "/search, /dossier, /week, /alerts, /intervene, /config, /gdpr"
         )
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)  # type: ignore[union-attr]
 
@@ -671,6 +678,42 @@ class AdminBot:
         await update.message.reply_text(  # type: ignore[union-attr]
             f"\u274c Nessun abbonamento trovato per <code>{session_id_str}</code>.",
             parse_mode=ParseMode.HTML,
+        )
+
+    @admin_only
+    async def _cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/queue — list pending callback appointments."""
+        from src.scheduling.service import scheduling_service
+
+        try:
+            async with async_session_factory() as db:
+                appointments = await scheduling_service.get_pending_appointments(db)
+        except Exception:
+            logger.exception("Failed to query pending appointments")
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\u274c Errore nel recupero degli appuntamenti."
+            )
+            return
+
+        if not appointments:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\U0001f4c5 Nessun appuntamento in coda."
+            )
+            return
+
+        lines: list[str] = [f"\U0001f4c5 <b>Appuntamenti in coda ({len(appointments)})</b>\n"]
+        for appt in appointments:
+            session_short = str(appt.session_id)[:8]
+            operator_name = appt.operator.name if appt.operator else "non assegnato"
+            created = appt.created_at.strftime("%d/%m %H:%M") if appt.created_at else "?"
+            notes = appt.notes or "-"
+            lines.append(
+                f"<code>{session_short}</code> | {operator_name} | {created}\n"
+                f"  {notes}"
+            )
+
+        await update.message.reply_text(  # type: ignore[union-attr]
+            "\n".join(lines), parse_mode=ParseMode.HTML
         )
 
     @admin_only
