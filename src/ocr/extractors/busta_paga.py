@@ -25,7 +25,7 @@ EXTRACTION_PROMPT = (
     '- "employer_category": "statale", "pubblico", "privato" o "parapubblico"\n'
     '- "contract_type": "indeterminato", "determinato" o "apprendistato"\n'
     '- "ccnl": contratto collettivo applicato\n'
-    '- "hiring_date": data di assunzione (DD/MM/YYYY)\n'
+    '- "hiring_date": data di assunzione (DD/MM/YYYY con anno a 4 cifre, es. 01/03/2015). NON confondere con la data di nascita.\n'
     '- "pay_period": periodo retributivo (MM/YYYY)\n'
     '- "ral": retribuzione annua lorda (numero)\n'
     '- "gross_salary": retribuzione lorda mensile (numero)\n'

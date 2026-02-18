@@ -64,7 +64,7 @@ class LLMSettings(BaseSettings):
     ocr_timeout: int = Field(default=120, description="OCR LLM timeout in seconds (includes model swap)")
     keep_alive: str = Field(default="-1m", description="Ollama keep_alive parameter (-1m = never unload)")
     conversation_max_tokens: int = Field(default=400, description="Max tokens for conversation responses")
-    ocr_max_tokens: int = Field(default=600, description="Max tokens for OCR extraction responses")
+    ocr_max_tokens: int = Field(default=2048, description="Max tokens for OCR extraction responses")
 
 
 class TelegramSettings(BaseSettings):
