@@ -34,11 +34,13 @@ from src.admin.queries import (
     get_recent_alerts,
     get_sessions_paginated,
     get_today_stats,
+    resolve_deletion_request,
     resolve_session_id,
 )
 from src.db.engine import get_session
 from src.schemas.events import EventType, SystemEvent
 from src.security.encryption import field_encryptor
+from src.security.erasure import erasure_processor
 
 logger = logging.getLogger(__name__)
 
@@ -276,3 +278,38 @@ async def partial_session_table(
         "outcome": outcome or "",
         "employment_type": employment_type or "",
     })
+
+
+# ── GDPR actions ────────────────────────────────────────────────────
+
+
+@router.post("/gdpr/process/{request_id}", response_class=HTMLResponse)
+async def gdpr_process_request(
+    request: Request,
+    request_id: str,
+    db: AsyncSession = Depends(get_session),
+    admin: str = Depends(verify_admin),
+) -> HTMLResponse:
+    """Process a deletion request — returns HTMX partial with result."""
+    await _emit_access(admin, "gdpr_process")
+
+    deletion_req = await resolve_deletion_request(db, request_id)
+    if deletion_req is None:
+        return HTMLResponse(
+            '<span class="text-red-600 text-sm">Richiesta non trovata</span>',
+            status_code=404,
+        )
+
+    result = await erasure_processor.process_erasure(db, deletion_req.id)
+
+    if result.success:
+        return HTMLResponse(
+            '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full '
+            'text-xs font-medium bg-green-100 text-green-800">'
+            f"Completata ({result.sessions} sessioni, {result.messages} messaggi)</span>"
+        )
+
+    return HTMLResponse(
+        '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full '
+        f'text-xs font-medium bg-red-100 text-red-800">Errore: {result.error}</span>'
+    )

@@ -282,6 +282,23 @@ async def get_gdpr_overview(db: AsyncSession) -> dict[str, Any]:
     }
 
 
+async def resolve_deletion_request(db: AsyncSession, id_str: str) -> DataDeletionRequest | None:
+    """Find a DataDeletionRequest by full UUID or short prefix."""
+    if len(id_str) < 36:
+        result = await db.execute(
+            select(DataDeletionRequest)
+            .where(cast(DataDeletionRequest.id, String).like(f"{id_str}%"))
+            .options(selectinload(DataDeletionRequest.user))
+        )
+    else:
+        result = await db.execute(
+            select(DataDeletionRequest)
+            .where(DataDeletionRequest.id == uuid.UUID(id_str))
+            .options(selectinload(DataDeletionRequest.user))
+        )
+    return result.scalars().first()
+
+
 async def check_system_health() -> dict[str, Any]:
     """Check Ollama, PostgreSQL, and Redis health with latency measurements."""
     health: dict[str, Any] = {}

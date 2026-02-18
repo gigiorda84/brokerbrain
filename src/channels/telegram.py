@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from sqlalchemy import func, select
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -22,6 +23,12 @@ from telegram.ext import (
 from src.config import settings
 from src.conversation.engine import conversation_engine
 from src.db.engine import async_session_factory
+from src.models.deletion import DataDeletionRequest
+from src.models.enums import DeletionRequestStatus
+from src.models.session import Session
+from src.models.user import User
+from src.security.consent import consent_manager
+from src.security.erasure import erasure_processor
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +101,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Handle incoming text messages — route to conversation engine."""
     if update.effective_user is None or update.message is None or update.message.text is None:
         return
+
+    # Check for pending deletion confirmation
+    if context.user_data.get("awaiting_deletion_confirm"):  # type: ignore[union-attr]
+        context.user_data["awaiting_deletion_confirm"] = False  # type: ignore[index]
+
+        if update.message.text.strip().upper() == "CONFERMO":
+            telegram_id = str(update.effective_user.id)
+            try:
+                async with async_session_factory() as db:
+                    user = await _find_user_by_telegram_id(db, telegram_id)
+                    if user is None or user.anonymized:
+                        await update.message.reply_text("Non risultano dati da eliminare.")
+                        return
+
+                    request = await erasure_processor.request_erasure(db, user.id)
+                    result = await erasure_processor.process_erasure(db, request.id)
+                    await db.commit()
+
+                if result.success:
+                    await update.message.reply_text(
+                        "Cancellazione completata.\n\n"
+                        f"Sessioni: {result.sessions}\n"
+                        f"Messaggi redatti: {result.messages}\n"
+                        f"Documenti eliminati: {result.documents}\n"
+                        f"Dati estratti eliminati: {result.extracted_data}\n\n"
+                        "I suoi dati personali sono stati anonimizzati.\n"
+                        "Per qualsiasi domanda: privacy@primonetwork.it"
+                    )
+                else:
+                    await update.message.reply_text(
+                        "Si e' verificato un errore durante la cancellazione.\n"
+                        "La richiesta e' stata registrata e sara' elaborata manualmente.\n"
+                        "Per assistenza: privacy@primonetwork.it"
+                    )
+            except Exception:
+                logger.exception("Error processing erasure for user %s", telegram_id)
+                await update.message.reply_text(
+                    "Si e' verificato un errore. La richiesta e' stata registrata.\n"
+                    "Per assistenza: privacy@primonetwork.it"
+                )
+        else:
+            await update.message.reply_text(
+                "Richiesta di cancellazione annullata.\n"
+                "Puo' riprendere la conversazione normalmente."
+            )
+        return
+
     await _process_with_typing(update, context, update.message.text, update.effective_user.first_name)
 
 
@@ -157,6 +211,118 @@ async def operator_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
+async def _find_user_by_telegram_id(db: object, telegram_id: str) -> User | None:
+    """Find a user by their Telegram ID."""
+    result = await db.execute(select(User).where(User.telegram_id == telegram_id))  # type: ignore[union-attr]
+    return result.scalar_one_or_none()
+
+
+async def _check_existing_deletion_request(db: object, user_id: object) -> DataDeletionRequest | None:
+    """Check for an existing pending deletion request."""
+    result = await db.execute(  # type: ignore[union-attr]
+        select(DataDeletionRequest)
+        .where(
+            DataDeletionRequest.user_id == user_id,
+            DataDeletionRequest.status == DeletionRequestStatus.PENDING.value,
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def elimina_dati_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/elimina_dati — request data deletion (GDPR Art. 17)."""
+    if update.effective_user is None or update.message is None:
+        return
+
+    telegram_id = str(update.effective_user.id)
+
+    async with async_session_factory() as db:
+        user = await _find_user_by_telegram_id(db, telegram_id)
+        if user is None or user.anonymized:
+            await update.message.reply_text(
+                "Non risultano dati associati al suo account."
+            )
+            return
+
+        # Check for existing pending request
+        existing = await _check_existing_deletion_request(db, user.id)
+        if existing is not None:
+            await update.message.reply_text(
+                "Una richiesta di cancellazione e' gia' in corso.\n"
+                "Sara' elaborata al piu' presto."
+            )
+            return
+
+    # Ask for confirmation
+    context.user_data["awaiting_deletion_confirm"] = True  # type: ignore[index]
+    await update.message.reply_text(
+        "Attenzione: questa operazione e' irreversibile.\n\n"
+        "Verranno eliminati:\n"
+        "- Tutte le conversazioni e i messaggi\n"
+        "- Documenti caricati e dati estratti\n"
+        "- Calcoli, verifiche di idoneita' e preventivi\n"
+        "- Dati personali (nome, contatti, codice fiscale)\n\n"
+        "Saranno conservati solo i registri di consenso e audit "
+        "(obbligo normativo, 5 anni).\n\n"
+        "Per confermare, scriva CONFERMO.\n"
+        "Per annullare, scriva qualsiasi altra cosa."
+    )
+
+
+async def i_miei_dati_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/i_miei_dati — view personal data summary (GDPR Art. 15)."""
+    if update.effective_user is None or update.message is None:
+        return
+
+    telegram_id = str(update.effective_user.id)
+
+    async with async_session_factory() as db:
+        user = await _find_user_by_telegram_id(db, telegram_id)
+        if user is None or user.anonymized:
+            await update.message.reply_text(
+                "Non risultano dati associati al suo account."
+            )
+            return
+
+        # Get consent status
+        consent_status = await consent_manager.get_consent_status(db, user.id)
+
+        # Count sessions
+        session_count_result = await db.execute(
+            select(func.count(Session.id)).where(Session.user_id == user.id)
+        )
+        session_count = session_count_result.scalar() or 0
+
+    # Build summary
+    consent_labels = {
+        "privacy_policy": "Privacy policy",
+        "data_processing": "Trattamento dati",
+        "marketing": "Marketing",
+        "third_party": "Terze parti",
+    }
+    consent_lines = []
+    for key, label in consent_labels.items():
+        status = consent_status.get(key, False)
+        icon = "Si'" if status else "No"
+        consent_lines.append(f"  - {label}: {icon}")
+
+    reg_date = user.created_at.strftime("%d/%m/%Y") if user.created_at else "N/D"
+
+    await update.message.reply_text(
+        "I suoi dati presso ameconviene.it:\n\n"
+        f"Nome: {user.first_name or 'N/D'} {user.last_name or ''}\n"
+        f"Canale: {user.channel}\n"
+        f"Registrazione: {reg_date}\n"
+        f"Sessioni: {session_count}\n\n"
+        "Consensi:\n"
+        + "\n".join(consent_lines)
+        + "\n\n"
+        "Per richiedere la cancellazione dei dati: /elimina_dati\n"
+        "Per assistenza: privacy@primonetwork.it"
+    )
+
+
 def create_telegram_app() -> Application:
     """Build and configure the Telegram bot application.
 
@@ -174,6 +340,8 @@ def create_telegram_app() -> Application:
     app.add_handler(CommandHandler("aiuto", help_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("operatore", operator_command))
+    app.add_handler(CommandHandler("elimina_dati", elimina_dati_command))
+    app.add_handler(CommandHandler("i_miei_dati", i_miei_dati_command))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

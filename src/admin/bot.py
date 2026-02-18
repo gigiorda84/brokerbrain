@@ -26,11 +26,13 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from src.admin.events import subscribe, unsubscribe
+from src.admin.queries import get_gdpr_overview, resolve_deletion_request
 from src.config import settings
 from src.db.engine import async_session_factory, redis_client
 from src.models.audit import AuditLog
 from src.models.session import Session
 from src.schemas.events import EventType, SystemEvent
+from src.security.erasure import erasure_processor
 
 logger = logging.getLogger(__name__)
 
@@ -141,9 +143,11 @@ class AdminBot:
         self._app.add_handler(CommandHandler("unlive", self._cmd_unlive))
 
         self._app.add_handler(CommandHandler("queue", self._cmd_queue))
+        self._app.add_handler(CommandHandler("gdpr", self._cmd_gdpr))
+        self._app.add_handler(CommandHandler("gdpr_process", self._cmd_gdpr_process))
 
         # Stub commands (Phase 2)
-        for stub in ("search", "dossier", "week", "alerts", "intervene", "config", "gdpr"):
+        for stub in ("search", "dossier", "week", "alerts", "intervene", "config"):
             self._app.add_handler(CommandHandler(stub, self._cmd_stub))
 
         await self._app.initialize()
@@ -226,9 +230,11 @@ class AdminBot:
             "/errors \u2014 Errori recenti (24h)\n"
             "/live &lt;id&gt; \u2014 Segui sessione in tempo reale\n"
             "/unlive &lt;id&gt; \u2014 Smetti di seguire\n"
-            "/queue \u2014 Appuntamenti in coda\n\n"
+            "/queue \u2014 Appuntamenti in coda\n"
+            "/gdpr \u2014 Panoramica GDPR e cancellazioni\n"
+            "/gdpr_process &lt;id&gt; \u2014 Esegui cancellazione\n\n"
             "<b>In arrivo:</b>\n"
-            "/search, /dossier, /week, /alerts, /intervene, /config, /gdpr"
+            "/search, /dossier, /week, /alerts, /intervene, /config"
         )
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)  # type: ignore[union-attr]
 
@@ -715,6 +721,93 @@ class AdminBot:
         await update.message.reply_text(  # type: ignore[union-attr]
             "\n".join(lines), parse_mode=ParseMode.HTML
         )
+
+    @admin_only
+    async def _cmd_gdpr(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/gdpr — consent stats and pending deletion requests."""
+        try:
+            async with async_session_factory() as db:
+                gdpr = await get_gdpr_overview(db)
+        except Exception:
+            logger.exception("Failed to query GDPR overview")
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\u274c Errore nel recupero dei dati GDPR."
+            )
+            return
+
+        lines: list[str] = [
+            "\U0001f6e1 <b>GDPR Overview</b>\n",
+            f"<b>Utenti totali:</b> {gdpr['total_users']}",
+            f"<b>Con consenso:</b> {gdpr['with_consent']}",
+            f"<b>Consenso revocato:</b> {gdpr['revoked']}",
+        ]
+
+        pending = gdpr["pending_deletions"]
+        if pending:
+            lines.append(f"\n<b>Richieste in sospeso ({len(pending)}):</b>")
+            for req in pending:
+                short_id = str(req.id)[:8]
+                name = req.user.first_name if req.user and req.user.first_name else str(req.user_id)[:8]
+                date_str = req.requested_at.strftime("%d/%m %H:%M") if req.requested_at else "?"
+                lines.append(
+                    f"  <code>{short_id}</code> | {name} | {date_str} | {req.status}\n"
+                    f"  \u2192 /gdpr_process {short_id}"
+                )
+        else:
+            lines.append("\n\u2705 Nessuna richiesta in sospeso.")
+
+        await update.message.reply_text(  # type: ignore[union-attr]
+            "\n".join(lines), parse_mode=ParseMode.HTML
+        )
+
+    @admin_only
+    async def _cmd_gdpr_process(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/gdpr_process <id> — process a pending deletion request."""
+        if not context.args:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "Uso: /gdpr_process &lt;request_id&gt;",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        id_str = context.args[0]
+
+        try:
+            async with async_session_factory() as db:
+                request = await resolve_deletion_request(db, id_str)
+                if request is None:
+                    await update.message.reply_text(  # type: ignore[union-attr]
+                        f"\u274c Richiesta <code>{id_str}</code> non trovata.",
+                        parse_mode=ParseMode.HTML,
+                    )
+                    return
+
+                result = await erasure_processor.process_erasure(db, request.id)
+                await db.commit()
+
+            if result.success:
+                await update.message.reply_text(  # type: ignore[union-attr]
+                    f"\u2705 <b>Cancellazione completata</b>\n\n"
+                    f"Sessioni: {result.sessions}\n"
+                    f"Messaggi redatti: {result.messages}\n"
+                    f"Documenti eliminati: {result.documents}\n"
+                    f"Dati estratti: {result.extracted_data}\n"
+                    f"Passivit\u00e0: {result.liabilities}\n"
+                    f"Calcoli DTI/CdQ: {result.dti_calculations + result.cdq_calculations}\n"
+                    f"Prodotti: {result.product_matches}\n"
+                    f"Preventivi: {result.quotation_data}\n"
+                    f"Appuntamenti annullati: {result.appointments_cancelled}",
+                    parse_mode=ParseMode.HTML,
+                )
+            else:
+                await update.message.reply_text(  # type: ignore[union-attr]
+                    f"\u274c Cancellazione fallita: {result.error}",
+                )
+        except Exception:
+            logger.exception("Failed to process deletion request %s", id_str)
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\u274c Errore nell'elaborazione della richiesta."
+            )
 
     @admin_only
     async def _cmd_stub(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

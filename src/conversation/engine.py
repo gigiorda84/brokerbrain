@@ -51,6 +51,7 @@ from src.ocr.pipeline import process_document
 from src.schemas.calculators import DtiResult
 from src.schemas.eligibility import EligibilityResult, LiabilitySnapshot, UserProfile
 from src.schemas.events import EventType, SystemEvent
+from src.security.consent import CONSENT_FIELD_MAP, consent_manager
 from src.security.encryption import field_encryptor
 
 logger = logging.getLogger(__name__)
@@ -716,6 +717,22 @@ class ConversationEngine:
                 await fsm.transition(trigger)
                 session.current_state = fsm.current_state.value
 
+                # Record consent when transitioning from CONSENT state
+                if current_state == ConversationState.CONSENT:
+                    user = await db.get(User, session.user_id)
+                    if user is not None:
+                        if trigger == "accepted":
+                            for field_key, consent_type in CONSENT_FIELD_MAP.items():
+                                granted = bool(data.get(field_key, True))
+                                await consent_manager.record_consent(
+                                    db, user.id, consent_type, granted=granted, method="chat",
+                                )
+                        elif trigger == "declined":
+                            for consent_type in CONSENT_FIELD_MAP.values():
+                                await consent_manager.record_consent(
+                                    db, user.id, consent_type, granted=False, method="chat",
+                                )
+
                 # Store session-level fields
                 for data_key, session_attr in SESSION_FIELD_MAP.items():
                     if data_key in data:
@@ -1160,6 +1177,8 @@ class ConversationEngine:
                 value = extracted_fields[key]
                 if key in ("net_salary", "net_pension", "gross_salary", "gross_pension"):
                     value = f"€{value}"
+                elif hasattr(value, "value"):
+                    value = str(value.value).replace("_", " ").capitalize()
                 parts.append(f"- {label}: {value}")
 
         if ocr_result.fields_needing_confirmation:
