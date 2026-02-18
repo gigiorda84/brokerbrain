@@ -31,21 +31,34 @@ class DatabaseSettings(BaseSettings):
 
 
 class LLMSettings(BaseSettings):
-    """Ollama LLM configuration."""
+    """LLM configuration — supports Ollama (local) and DeepInfra (cloud)."""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    # Provider switch: "deepinfra" or "ollama"
+    llm_provider: str = Field(default="deepinfra", description="LLM backend: 'deepinfra' or 'ollama'")
+
+    # DeepInfra settings
+    deepinfra_api_key: str = Field(default="", description="DeepInfra API key (Bearer token)")
+    deepinfra_base_url: str = Field(
+        default="https://api.deepinfra.com/v1/openai",
+        description="DeepInfra OpenAI-compatible base URL",
+    )
+
+    # Ollama settings (used when llm_provider=ollama)
     ollama_base_url: str = Field(
         default="http://localhost:11434",
         description="Ollama API base URL",
     )
+
+    # Model names (format depends on provider)
     conversation_model: str = Field(
-        default="qwen3:8b-q4_K_M",
-        description="Model for conversation (Qwen3 8B)",
+        default="Qwen/Qwen3-14B",
+        description="Model for conversation",
     )
     vision_model: str = Field(
-        default="qwen2.5-vl:7b-q4_K_M",
-        description="Model for OCR (Qwen2.5-VL 7B)",
+        default="Qwen/Qwen3-VL-30B-A3B-Instruct",
+        description="Model for OCR / vision",
     )
     conversation_timeout: int = Field(default=30, description="Conversation LLM timeout in seconds")
     ocr_timeout: int = Field(default=120, description="OCR LLM timeout in seconds (includes model swap)")
