@@ -1,265 +1,98 @@
-# CLAUDE.md — BrokerBot (ameconviene.it)
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-BrokerBot is an AI-powered lead qualification chatbot for **ameconviene.it** (consumer brand of **Primo Network Srl**, Italian credit brokerage, OAM M94, Turin). It qualifies consumers for 9 financial products (cessione del quinto, prestiti, mutui, TFS, insurance) via WhatsApp/Telegram, using local LLMs for conversation and document OCR.
+BrokerBot is an AI-powered lead qualification chatbot for **ameconviene.it** (Primo Network Srl, Italian credit brokerage, OAM M94). It qualifies consumers for 9 financial products (cessione del quinto, prestiti, mutui, TFS, insurance) via Telegram/WhatsApp using local LLMs (Ollama) for conversation and document OCR.
 
 **Owner:** Giuseppe Giordano
 **Legal entity:** Primo Network Srl (P.IVA 08154920014)
-**Full PRD:** `docs/PRD_v1.5.md` — read this for complete business logic, product rules, and regulatory requirements.
+**Full PRD:** `docs/PRD_v1.5.md` — read relevant sections before working on any module.
+
+## Development Commands
+
+```bash
+# Setup
+pip install -e ".[dev]"
+docker compose up -d                          # PostgreSQL 16 + Redis 7
+scripts/setup_ollama.sh                       # Download Qwen3 8B + Qwen2.5-VL 7B
+
+# Run
+uvicorn src.main:app --reload                 # Dev server on :8000
+python -m src.main                            # Production entry point
+
+# Database
+alembic upgrade head                          # Run migrations
+alembic revision --autogenerate -m "desc"     # Generate migration
+
+# Test
+pytest                                        # All tests
+pytest tests/test_cf_decoder.py -v            # Single test file
+pytest tests/ --cov                           # With coverage
+
+# Lint & Type Check
+ruff check src/                               # Lint (line-length=120)
+ruff check src/ --fix                         # Auto-fix
+mypy src/                                     # Type check (strict mode)
+```
 
 ## Architecture
 
 ```
-User (WhatsApp/Telegram)
+User (Telegram/WhatsApp)
   → FastAPI webhook
     → Conversation Engine (FSM + Qwen3 8B via Ollama)
-      → OCR Pipeline (Qwen2.5-VL 7B via Ollama) — when documents received
-      → CF Decoder (pure Python) — extract age/gender from codice fiscale
-      → Liabilities Collector — existing debts, CdQ detection
-      → Calculators (DTI, CdQ rata/capacity/renewal) — pure Python
-      → Eligibility Engine — rule-based product matching
-      → Dossier Builder — pre-fill Primo Network quotation forms
-    → Admin Interface (Telegram bot + FastAPI/HTMX dashboard)
-  → Scheduling (Cal.com/Calendly API)
+      → OCR Pipeline (Qwen2.5-VL 7B) — model-swapped on demand
+      → CF Decoder / Calculators (pure Python, deterministic)
+      → Eligibility Engine (rule-based product matching)
+      → Dossier Builder (pre-fills Primo Network forms)
+    → Admin Interface (Telegram bot + HTMX dashboard)
   → PostgreSQL + Redis
 ```
 
-## Tech Stack
+### Core Design Principles
 
-- **Python 3.12+**, **FastAPI**, async throughout
-- **Ollama** for LLM serving (Qwen3 8B conversation, Qwen2.5-VL 7B OCR)
-- **PostgreSQL 16** with JSONB, **Redis** for session state and queues
-- **python-telegram-bot** for both user bot and admin bot
-- **Docker Compose** for local development and deployment
-- **Jinja2 + HTMX** for admin web dashboard (no frontend build step)
-- **Pydantic v2** for all data validation
-- **SQLAlchemy 2.0** async ORM
-- **Alembic** for migrations
+1. **FSM controls flow, LLM generates text.** The finite state machine (`src/conversation/states.py`) enforces all transitions. The LLM (Qwen3 8B) only generates natural Italian responses — it never makes financial decisions.
 
-## Project Structure
+2. **Deterministic over LLM.** CF decoding, CdQ/DTI calculations, eligibility rules are all pure Python with unit tests. No LLM for math or decisions.
 
-```
-brokerbot/
-├── CLAUDE.md                    # This file
-├── docs/
-│   └── PRD_v1.5.md             # Full product requirements
-├── docker-compose.yml
-├── pyproject.toml
-├── alembic.ini
-├── alembic/
-│   └── versions/
-├── src/
-│   ├── __init__.py
-│   ├── main.py                  # FastAPI app, lifespan, webhook endpoints
-│   ├── config.py                # Settings via pydantic-settings (env vars)
-│   ├── models/                  # SQLAlchemy ORM models
-│   │   ├── __init__.py
-│   │   ├── user.py
-│   │   ├── session.py
-│   │   ├── message.py
-│   │   ├── document.py
-│   │   ├── extracted_data.py
-│   │   ├── liability.py
-│   │   ├── calculation.py
-│   │   ├── product_match.py
-│   │   ├── appointment.py
-│   │   ├── audit.py
-│   │   └── consent.py
-│   ├── schemas/                 # Pydantic schemas (request/response/internal)
-│   │   ├── __init__.py
-│   │   ├── ocr.py               # OCR extraction schemas per document type
-│   │   ├── eligibility.py       # Product matching input/output
-│   │   ├── quotation.py         # Pre-filled form data for Primo Network
-│   │   ├── dossier.py           # Lead dossier structure
-│   │   └── events.py            # System event schemas
-│   ├── conversation/            # Conversation engine
-│   │   ├── __init__.py
-│   │   ├── engine.py            # Main orchestrator: receive message → process → respond
-│   │   ├── states.py            # State enum + transition rules
-│   │   ├── fsm.py               # Finite state machine implementation
-│   │   ├── prompts/             # LLM system prompts per state
-│   │   │   ├── welcome.py
-│   │   │   ├── consent.py
-│   │   │   ├── needs_assessment.py
-│   │   │   ├── employment_type.py
-│   │   │   ├── employer_class.py
-│   │   │   ├── pension_class.py
-│   │   │   ├── track_choice.py
-│   │   │   ├── doc_request.py
-│   │   │   ├── manual_collection.py
-│   │   │   ├── household.py
-│   │   │   ├── liabilities.py
-│   │   │   ├── result.py
-│   │   │   ├── scheduling.py
-│   │   │   └── base.py          # Shared prompt components (identity, tone, disclaimers)
-│   │   └── handlers/            # Per-state message handlers
-│   │       ├── __init__.py
-│   │       └── ... (one per state or group)
-│   ├── ocr/                     # Document processing pipeline
-│   │   ├── __init__.py
-│   │   ├── pipeline.py          # Main pipeline: receive doc → classify → extract → validate
-│   │   ├── preprocessor.py      # Image preprocessing (resize, orient, contrast)
-│   │   ├── classifier.py        # Document type classification
-│   │   ├── extractors/          # Type-specific extraction prompts
-│   │   │   ├── busta_paga.py
-│   │   │   ├── cedolino_pensione.py
-│   │   │   ├── dichiarazione_redditi.py
-│   │   │   ├── conteggio_estintivo.py
-│   │   │   └── f24.py
-│   │   └── validator.py         # Post-extraction validation (ranges, checksums, dates)
-│   ├── decoders/                # Deterministic data decoders
-│   │   ├── __init__.py
-│   │   ├── codice_fiscale.py    # CF → birthdate, age, gender, birthplace
-│   │   └── ateco.py             # ATECO code → profitability coefficient (forfettario)
-│   ├── calculators/             # Financial calculators
-│   │   ├── __init__.py
-│   │   ├── cdq.py               # CdQ rata, capacity, renewal eligibility
-│   │   ├── dti.py               # Debt-to-income ratio
-│   │   └── income.py            # Income normalization (monthly equivalent)
-│   ├── eligibility/             # Product matching engine
-│   │   ├── __init__.py
-│   │   ├── engine.py            # Main engine: profile → matched products
-│   │   ├── rules.py             # Rule loader (from Excel/YAML)
-│   │   ├── products.py          # Primo Network product definitions
-│   │   └── suggestions.py       # Smart suggestions (consolidamento, rinnovo, etc.)
-│   ├── dossier/                 # Lead dossier builder
-│   │   ├── __init__.py
-│   │   ├── builder.py           # Assembles full dossier from session data
-│   │   └── quotation.py         # Maps to Primo Network's 3 form schemas
-│   ├── channels/                # Messaging channel adapters
-│   │   ├── __init__.py
-│   │   ├── base.py              # Abstract channel interface
-│   │   ├── telegram.py          # Telegram user bot
-│   │   └── whatsapp.py          # WhatsApp Business API
-│   ├── admin/                   # Admin interface
-│   │   ├── __init__.py
-│   │   ├── bot.py               # Telegram admin bot
-│   │   ├── web.py               # FastAPI admin routes
-│   │   ├── alerts.py            # Alert rules and push notifications
-│   │   ├── events.py            # Event emitter + listener system
-│   │   └── templates/           # Jinja2 + HTMX templates
-│   │       ├── base.html
-│   │       ├── dashboard.html
-│   │       ├── sessions.html
-│   │       ├── session_detail.html
-│   │       ├── pipeline.html
-│   │       ├── health.html
-│   │       └── gdpr.html
-│   ├── scheduling/              # Appointment booking
-│   │   ├── __init__.py
-│   │   └── calcom.py            # Cal.com / Calendly integration
-│   ├── llm/                     # LLM client wrapper
-│   │   ├── __init__.py
-│   │   ├── client.py            # Ollama client (OpenAI-compatible API)
-│   │   ├── models.py            # Model definitions, loading strategy
-│   │   └── context.py           # Context/prompt builder with token management
-│   ├── security/                # Security & GDPR
-│   │   ├── __init__.py
-│   │   ├── encryption.py        # Field-level AES-256 encryption
-│   │   ├── consent.py           # Consent management
-│   │   ├── erasure.py           # Right to erasure (/elimina_dati) workflow
-│   │   └── audit.py             # Audit logging
-│   └── db/                      # Database
-│       ├── __init__.py
-│       ├── engine.py            # Async engine + session factory
-│       └── migrations.py        # Alembic helpers
-├── data/
-│   ├── ateco_coefficients.json  # ATECO → forfettario profitability coefficients
-│   ├── cadastral_codes.json     # CF birthplace codes → municipality names
-│   ├── eligibility_rules.xlsx   # Operator-editable product rules
-│   └── prompts/                 # External prompt templates (if preferred over Python)
-├── tests/
-│   ├── conftest.py
-│   ├── test_cf_decoder.py
-│   ├── test_cdq_calculator.py
-│   ├── test_dti_calculator.py
-│   ├── test_eligibility.py
-│   ├── test_fsm.py
-│   ├── test_ocr_validators.py
-│   └── test_conversation/
-│       └── test_scenarios.py    # End-to-end conversation test scenarios
-└── scripts/
-    ├── setup_ollama.sh          # Download and configure Ollama models
-    ├── seed_db.py               # Seed database with initial data
-    └── generate_test_data.py    # Generate test payslips/cedolini for development
-```
+3. **Sequential model loading.** On 16GB M2, only one model fits. Conversation model loads by default; vision model swaps in for OCR (~10-15s cold start), then swaps back.
 
-## Key Design Decisions
+4. **Event-driven everything.** Every action emits a `SystemEvent` feeding audit log, admin bot, and web dashboard simultaneously.
 
-1. **FSM backbone + LLM responses:** The finite state machine controls flow and data collection. The LLM generates natural Italian responses within the constraints of each state. Never let the LLM make financial decisions — only the rules engine and calculators do that.
+5. **Source tracking.** Every extracted data field records its `DataSource` (ocr, cf_decode, manual, computed, etc.) for dossier confidence and audit.
 
-2. **Sequential model loading (MVP):** On 16GB M2, only one model fits in memory. Conversation model (Qwen3 8B) is active by default. When a document is received, unload conversation model, load vision model (Qwen2.5-VL 7B), process, then swap back. ~10–15s cold-start.
+## Key Conventions
 
-3. **Everything is an event:** Every action emits a `SystemEvent` that feeds the audit log, admin bot, and web dashboard simultaneously. This is core infrastructure, not an afterthought.
-
-4. **Deterministic over LLM:** CF decoding, CdQ calculations, DTI ratios, eligibility rules — all pure Python with unit tests. The LLM is only used for natural language understanding and generation, never for math or decisions.
-
-5. **Source tracking:** Every data field records its source (ocr, ocr_confirmed, cf_decode, manual, computed, api, self_declared). This feeds the dossier confidence levels and audit trail.
-
-## Coding Standards
-
-- Type hints everywhere. Use `from __future__ import annotations`.
-- Pydantic v2 models for all external data boundaries.
-- Async by default (asyncio, async SQLAlchemy, async Redis).
-- Structured logging (JSON format via `structlog`).
-- Tests for all calculators, decoders, and eligibility rules.
-- Italian text in prompts and user-facing messages; English in code and comments.
-- All financial amounts as `Decimal`, never `float`.
-- Docstrings on all public functions and classes.
-
-## Environment Variables
-
-```env
-# LLM
-OLLAMA_BASE_URL=http://localhost:11434
-CONVERSATION_MODEL=qwen3:8b-q4_K_M
-VISION_MODEL=qwen2.5-vl:7b-q4_K_M
-
-# Database
-DATABASE_URL=postgresql+asyncpg://brokerbot:password@localhost:5432/brokerbot
-REDIS_URL=redis://localhost:6379/0
-
-# Telegram
-TELEGRAM_USER_BOT_TOKEN=...
-TELEGRAM_ADMIN_BOT_TOKEN=...
-ADMIN_TELEGRAM_IDS=123456789  # comma-separated
-
-# WhatsApp (Phase 1b)
-WHATSAPP_API_URL=...
-WHATSAPP_API_TOKEN=...
-
-# Scheduling
-CALCOM_API_URL=...
-CALCOM_API_KEY=...
-
-# Security
-ENCRYPTION_KEY=...           # 32-byte AES key, base64 encoded
-JWT_SECRET=...               # For admin web auth (Phase 2)
-ADMIN_WEB_PASSWORD=...       # HTTP Basic Auth (Phase 1)
-
-# Branding
-BOT_NAME=ameconviene.it
-LEGAL_ENTITY=Primo Network Srl
-OAM_NUMBER=M94
-TOLL_FREE=800.99.00.90
-```
-
-## How to Work with This Project
-
-1. **Before coding any module,** read the relevant section of `docs/PRD_v1.5.md`.
-2. **Start with the foundation:** models, DB, config, event system, LLM client.
-3. **Build bottom-up:** decoders/calculators (testable, no dependencies) → eligibility engine → OCR pipeline → conversation engine → channels → admin.
-4. **Test calculators first** — they're pure functions with known inputs/outputs.
-5. **The FSM is the backbone** — get it right before layering LLM responses.
-6. **Admin is not Phase 2** — the event system and Telegram admin bot are built in Week 1–2.
+- **Type hints everywhere** with `from __future__ import annotations`
+- **Pydantic v2** for all external data boundaries
+- **Async throughout** — async SQLAlchemy, async Redis, async httpx for LLM
+- **All money as `Decimal`**, never `float`. PostgreSQL `Numeric(12,2)` storage
+- **Italian text** in prompts and user-facing messages; **English** in code and comments
+- **Italian UX:** formal "lei" register, €1.750,00 formatting, DD/MM/YYYY dates, numbered options (not bullets)
+- **Ruff rules:** E, F, I, N, UP, B, A, SIM at 120 char line length
+- **Structured logging** via `structlog` (JSON format)
+- **Field-level encryption** (AES-256-GCM) for sensitive data (CF, P.IVA, amounts)
+- **TimestampMixin** on all models: UUID `id`, `created_at`, `updated_at`
+- **JSONB** for flexible fields: `ocr_result`, `rule_results`, `confidence_scores`
 
 ## Agent System
 
-This project uses specialized agents (see `/agents/` directory). Each agent has deep knowledge of its subsystem and can be invoked for focused tasks. Use `/agents/README.md` for the full list and when to invoke each one.
+Specialized agent docs live in `agents/`. Each covers a subsystem with context, architecture decisions, dependencies, and implementation tasks:
 
-## Important Files to Read First
+| Agent | Domain |
+|---|---|
+| `foundation.md` | DB models, config, event system, LLM client |
+| `conversation.md` | FSM, state handlers, LLM prompts, Italian UX |
+| `ocr.md` | Document processing pipeline |
+| `calculators.md` | CF decoder, CdQ, DTI, income, eligibility |
+| `admin.md` | Telegram admin bot, web dashboard, alerts |
+| `channels.md` | Telegram/WhatsApp integration |
+| `compliance.md` | GDPR, encryption, consent, audit, erasure |
 
-1. This file (CLAUDE.md)
-2. `docs/PRD_v1.5.md` — Sections 3 (Products), 5 (Flow), 7 (Quotation Fields), 11 (Eligibility), 12 (Admin), 14 (Compliance)
-3. `agents/README.md` — Agent system overview
+Read the relevant agent file before working on that subsystem.
+
+## Environment
+
+Copy `.env.example` → `.env`. Key variables: `OLLAMA_BASE_URL`, `DATABASE_URL`, `REDIS_URL`, `TELEGRAM_USER_BOT_TOKEN`, `TELEGRAM_ADMIN_BOT_TOKEN`, `ADMIN_TELEGRAM_IDS`, `ENCRYPTION_KEY`. Full list in `src/config.py` (Pydantic Settings).

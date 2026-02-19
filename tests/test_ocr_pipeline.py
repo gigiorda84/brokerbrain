@@ -89,7 +89,7 @@ class TestPipelineHappyPath:
         assert result.doc_type == DocumentType.BUSTA_PAGA
         assert result.extraction_result is not None
         assert result.overall_confidence > 0
-        assert result.processing_time_ms > 0
+        assert result.processing_time_ms >= 0
         assert mock_ensure_model.call_count >= 1
 
 

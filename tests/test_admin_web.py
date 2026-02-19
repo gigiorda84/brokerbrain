@@ -149,9 +149,20 @@ def mock_queries():
         mock_paginated.return_value = ([], 0)
         mock_resolve.return_value = None
         mock_health.return_value = {
-            "ollama": {"status": "ok", "latency_ms": 15, "models": ["qwen3:8b"]},
+            "llm": {
+                "status": "ok",
+                "provider": "Ollama",
+                "latency_ms": 15,
+                "conversation_model": "qwen3:8b",
+                "vision_model": "qwen2.5-vl:7b",
+                "loaded_models": ["qwen3:8b"],
+            },
             "postgresql": {"status": "ok", "latency_ms": 2},
             "redis": {"status": "ok", "latency_ms": 1},
+            "tokens": {
+                "today": {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "all_time": {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            },
         }
         mock_audit.return_value = ([], 0)
         mock_gdpr.return_value = {

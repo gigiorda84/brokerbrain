@@ -13,9 +13,10 @@ dist/
 build/
 *.egg
 
-# IDE
+# IDE / Tools
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 .DS_Store
