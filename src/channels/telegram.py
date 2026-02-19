@@ -1,4 +1,4 @@
-"""Telegram user bot adapter — handles incoming messages via long-polling.
+"""Telegram user bot adapter — handles incoming messages via long-polling or webhook.
 
 Uses python-telegram-bot v21+ async. Routes messages to the conversation engine
 and sends responses back to the user.
@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from fastapi import APIRouter, Request, Response
 from sqlalchemy import func, select
-from telegram import Update
+from telegram import Bot, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
@@ -31,6 +32,32 @@ from src.security.consent import consent_manager
 from src.security.erasure import erasure_processor
 
 logger = logging.getLogger(__name__)
+
+# ── Webhook router ───────────────────────────────────────────────────
+
+telegram_router = APIRouter(prefix="/webhook", tags=["telegram"])
+
+
+@telegram_router.post("/telegram")
+async def telegram_webhook(request: Request) -> Response:
+    """Receive Telegram updates via webhook (production mode)."""
+    # Verify secret header if configured
+    secret = settings.telegram.telegram_webhook_secret
+    if secret:
+        header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if header_secret != secret:
+            return Response(status_code=403)
+
+    telegram_app: Application = request.app.state.telegram_app
+    bot: Bot = telegram_app.bot
+
+    data = await request.json()
+    update = Update.de_json(data, bot)
+
+    # Fire-and-forget — return 200 immediately so Telegram doesn't retry
+    asyncio.create_task(telegram_app.process_update(update))
+
+    return Response(status_code=200)
 
 # Interval between "typing..." indicator refreshes (Telegram typing expires after ~5s)
 _TYPING_INTERVAL = 4.0

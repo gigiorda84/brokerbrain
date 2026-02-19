@@ -20,7 +20,7 @@ from fastapi import FastAPI
 
 from src.admin.events import start_event_system, stop_event_system, subscribe
 from src.admin.web import router as admin_router
-from src.channels.telegram import create_telegram_app
+from src.channels.telegram import create_telegram_app, telegram_router
 from src.channels.whatsapp import whatsapp_router
 from src.config import settings
 from src.db.engine import db_lifespan
@@ -86,12 +86,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         else:
             logger.warning("TELEGRAM_ADMIN_BOT_TOKEN not set — admin bot and alerts disabled")
 
-        # 5. Telegram user bot — create, initialize, and start polling
+        # 5. Telegram user bot — create, initialize, and start (webhook or polling)
+        webhook_url = settings.telegram.telegram_webhook_url
         telegram_app = create_telegram_app()
         await telegram_app.initialize()
         await telegram_app.start()
-        await telegram_app.updater.start_polling(drop_pending_updates=True)  # type: ignore[union-attr]
-        logger.info("Telegram user bot polling started")
+
+        if webhook_url:
+            # Webhook mode (production) — Telegram pushes updates to us
+            await telegram_app.bot.set_webhook(
+                url=webhook_url,
+                secret_token=settings.telegram.telegram_webhook_secret or None,
+            )
+            app.state.telegram_app = telegram_app
+            logger.info("Telegram webhook set: %s", webhook_url)
+        else:
+            # Polling mode (local dev) — we pull updates from Telegram
+            await telegram_app.updater.start_polling(drop_pending_updates=True)  # type: ignore[union-attr]
+            logger.info("Telegram user bot polling started")
 
         try:
             yield
@@ -99,7 +111,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             # Shutdown in reverse order
             logger.info("Shutting down BrokerBot...")
 
-            if telegram_app.updater:
+            if webhook_url:
+                await telegram_app.bot.delete_webhook()
+                logger.info("Telegram webhook deleted")
+            elif telegram_app.updater:
                 await telegram_app.updater.stop()
             await telegram_app.stop()
             await telegram_app.shutdown()
@@ -128,6 +143,7 @@ app = FastAPI(
 )
 
 app.include_router(admin_router)
+app.include_router(telegram_router)
 app.include_router(whatsapp_router)
 
 

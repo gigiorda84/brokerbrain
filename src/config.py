@@ -24,6 +24,16 @@ class DatabaseSettings(BaseSettings):
         description="Redis connection string",
     )
 
+    @field_validator("database_url")
+    @classmethod
+    def normalize_database_url(cls, v: str) -> str:
+        """Convert Render's postgres:// to postgresql+asyncpg://."""
+        if v.startswith("postgres://"):
+            return v.replace("postgres://", "postgresql+asyncpg://", 1)
+        if v.startswith("postgresql://") and "+asyncpg" not in v:
+            return v.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return v
+
     @property
     def database_url_sync(self) -> str:
         """Synchronous database URL for Alembic migrations."""
@@ -83,6 +93,14 @@ class TelegramSettings(BaseSettings):
     admin_telegram_ids: str = Field(
         default="",
         description="Comma-separated Telegram user IDs for admin access",
+    )
+    telegram_webhook_url: str = Field(
+        default="",
+        description="Webhook URL (empty = polling mode)",
+    )
+    telegram_webhook_secret: str = Field(
+        default="",
+        description="Secret for X-Telegram-Bot-Api-Secret-Token header",
     )
 
     @property
