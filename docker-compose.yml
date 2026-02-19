@@ -1,9 +1,31 @@
-# docker-compose.yml — BrokerBot local development
+# docker-compose.yml — BrokerBot
 # Usage: docker compose up -d
 
 services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: brokerbot-app
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      # Override localhost URLs for Docker networking
+      DATABASE_URL: postgresql+asyncpg://brokerbot:brokerbot_dev@postgres:5432/brokerbot
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
+    container_name: brokerbot-postgres
     environment:
       POSTGRES_DB: brokerbot
       POSTGRES_USER: brokerbot
@@ -20,6 +42,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    container_name: brokerbot-redis
     ports:
       - "6379:6379"
     healthcheck:
@@ -44,4 +67,5 @@ services:
 
 volumes:
   pgdata:
+  uploads:
   # ollama_data:
