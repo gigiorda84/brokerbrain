@@ -123,6 +123,30 @@ ALERT_RULES: list[AlertRule] = [
         ),
         level="info",
     ),
+    AlertRule(
+        name="DTI alto",
+        event_types=[EventType.DTI_CALCULATED],
+        condition=lambda e: e.data.get("current_dti", 0) > 0.40,
+        template=(
+            "\u26a0\ufe0f <b>DTI alto</b>\n"
+            "DTI corrente: {current_dti:.0%}\n"
+            "Reddito: \u20ac{monthly_income}\n"
+            "Sessione: <code>{session_id}</code>"
+        ),
+        level="warning",
+    ),
+    AlertRule(
+        name="Documento bassa confidenza",
+        event_types=[EventType.DOCUMENT_CLASSIFIED],
+        condition=lambda e: e.data.get("overall_confidence", 1.0) < 0.80,
+        template=(
+            "\u26a0\ufe0f <b>Documento bassa confidenza</b>\n"
+            "Confidenza: {overall_confidence:.0%}\n"
+            "Tipo doc: {doc_type}\n"
+            "Sessione: <code>{session_id}</code>"
+        ),
+        level="warning",
+    ),
 ]
 
 

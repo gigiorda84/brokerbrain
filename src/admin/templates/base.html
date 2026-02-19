@@ -33,9 +33,17 @@
                    class="flex items-center px-6 py-3 text-sm {{ 'bg-gray-800 text-white border-r-2 border-blue-400' if '/health' in current_path else 'text-gray-300 hover:bg-gray-800 hover:text-white' }}">
                     <span class="mr-3">&#9829;</span> Stato Sistema
                 </a>
+                <a href="/admin/analytics"
+                   class="flex items-center px-6 py-3 text-sm {{ 'bg-gray-800 text-white border-r-2 border-blue-400' if '/analytics' in current_path else 'text-gray-300 hover:bg-gray-800 hover:text-white' }}">
+                    <span class="mr-3">&#9733;</span> Analytics
+                </a>
                 <a href="/admin/audit"
                    class="flex items-center px-6 py-3 text-sm {{ 'bg-gray-800 text-white border-r-2 border-blue-400' if '/audit' in current_path else 'text-gray-300 hover:bg-gray-800 hover:text-white' }}">
                     <span class="mr-3">&#9998;</span> Log Audit
+                </a>
+                <a href="/admin/rules"
+                   class="flex items-center px-6 py-3 text-sm {{ 'bg-gray-800 text-white border-r-2 border-blue-400' if '/rules' in current_path else 'text-gray-300 hover:bg-gray-800 hover:text-white' }}">
+                    <span class="mr-3">&#9881;</span> Regole
                 </a>
                 <a href="/admin/gdpr"
                    class="flex items-center px-6 py-3 text-sm {{ 'bg-gray-800 text-white border-r-2 border-blue-400' if '/gdpr' in current_path else 'text-gray-300 hover:bg-gray-800 hover:text-white' }}">

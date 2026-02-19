@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% block title %}Analytics - BrokerBot Admin{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+    <h2 class="text-2xl font-bold text-gray-800">Analytics</h2>
+    <button onclick="refreshCharts()"
+            class="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700">
+        Aggiorna dati
+    </button>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- Daily volume (stacked bar) -->
+    <div class="bg-white rounded-lg shadow p-6">
+        <h3 class="text-lg font-semibold text-gray-800 mb-4">Volume giornaliero (ultimi 30 giorni)</h3>
+        <canvas id="dailyChart" height="250"></canvas>
+    </div>
+
+    <!-- Conversion funnel (horizontal bar) -->
+    <div class="bg-white rounded-lg shadow p-6">
+        <h3 class="text-lg font-semibold text-gray-800 mb-4">Funnel di conversione</h3>
+        <canvas id="funnelChart" height="250"></canvas>
+    </div>
+
+    <!-- Product distribution (doughnut) -->
+    <div class="bg-white rounded-lg shadow p-6">
+        <h3 class="text-lg font-semibold text-gray-800 mb-4">Distribuzione prodotti idonei</h3>
+        <canvas id="productChart" height="250"></canvas>
+    </div>
+
+    <!-- DTI histogram (bar) -->
+    <div class="bg-white rounded-lg shadow p-6">
+        <h3 class="text-lg font-semibold text-gray-800 mb-4">Distribuzione DTI</h3>
+        <canvas id="dtiChart" height="250"></canvas>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script>
+    const COLORS = {
+        qualified: '#22c55e',
+        not_qualified: '#f97316',
+        abandoned: '#ef4444',
+        in_corso: '#3b82f6',
+        error: '#dc2626',
+    };
+
+    const PRODUCT_COLORS = [
+        '#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6',
+        '#ec4899', '#14b8a6', '#f97316', '#6366f1',
+    ];
+
+    // ── Parse server data ──
+    let dailyData = {{ daily | tojson }};
+    let funnelData = {{ funnel | tojson }};
+    let productData = {{ products | tojson }};
+    let dtiData = {{ dti | tojson }};
+
+    // ── Daily volume chart ──
+    function buildDailyChart(data) {
+        const dates = [...new Set(data.map(d => d.date))].sort();
+        const outcomes = [...new Set(data.map(d => d.outcome))];
+        const datasets = outcomes.map(outcome => ({
+            label: outcome,
+            data: dates.map(date => {
+                const match = data.find(d => d.date === date && d.outcome === outcome);
+                return match ? match.count : 0;
+            }),
+            backgroundColor: COLORS[outcome] || '#9ca3af',
+        }));
+        return { labels: dates, datasets };
+    }
+
+    const dailyChart = new Chart(document.getElementById('dailyChart'), {
+        type: 'bar',
+        data: buildDailyChart(dailyData),
+        options: {
+            responsive: true,
+            scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } },
+            plugins: { legend: { position: 'bottom' } },
+        },
+    });
+
+    // ── Funnel chart ──
+    function buildFunnelChart(data) {
+        return {
+            labels: data.map(d => d.stage),
+            datasets: [{
+                data: data.map(d => d.count),
+                backgroundColor: ['#3b82f6', '#6366f1', '#8b5cf6', '#a855f7', '#f59e0b', '#22c55e'],
+            }],
+        };
+    }
+
+    const funnelChart = new Chart(document.getElementById('funnelChart'), {
+        type: 'bar',
+        data: buildFunnelChart(funnelData),
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            plugins: { legend: { display: false } },
+            scales: { x: { beginAtZero: true } },
+        },
+    });
+
+    // ── Product distribution chart ──
+    function buildProductChart(data) {
+        return {
+            labels: data.map(d => d.product),
+            datasets: [{
+                data: data.map(d => d.count),
+                backgroundColor: PRODUCT_COLORS.slice(0, data.length),
+            }],
+        };
+    }
+
+    const productChart = new Chart(document.getElementById('productChart'), {
+        type: 'doughnut',
+        data: buildProductChart(productData),
+        options: {
+            responsive: true,
+            plugins: { legend: { position: 'bottom' } },
+        },
+    });
+
+    // ── DTI histogram ──
+    function buildDTIChart(data) {
+        return {
+            labels: data.map(d => d.bucket),
+            datasets: [{
+                label: 'Sessioni',
+                data: data.map(d => d.count),
+                backgroundColor: data.map((d, i) => i < 3 ? '#22c55e' : i < 4 ? '#f59e0b' : '#ef4444'),
+            }],
+        };
+    }
+
+    const dtiChart = new Chart(document.getElementById('dtiChart'), {
+        type: 'bar',
+        data: buildDTIChart(dtiData),
+        options: {
+            responsive: true,
+            plugins: { legend: { display: false } },
+            scales: { y: { beginAtZero: true } },
+        },
+    });
+
+    // ── Refresh via API ──
+    async function refreshCharts() {
+        try {
+            const resp = await fetch('/admin/api/analytics');
+            const data = await resp.json();
+
+            dailyChart.data = buildDailyChart(data.daily_volume);
+            dailyChart.update();
+
+            funnelChart.data = buildFunnelChart(data.conversion_funnel);
+            funnelChart.update();
+
+            productChart.data = buildProductChart(data.product_distribution);
+            productChart.update();
+
+            dtiChart.data = buildDTIChart(data.dti_histogram);
+            dtiChart.update();
+        } catch (err) {
+            console.error('Failed to refresh analytics:', err);
+        }
+    }
+</script>
+{% endblock %}

@@ -1,6 +1,6 @@
 """Admin web dashboard — FastAPI router with Jinja2 + HTMX.
 
-Provides 6 pages and 2 HTMX partial endpoints for real-time updates.
+Provides 12 pages, 3 HTMX partial endpoints, and 1 JSON API for analytics.
 All routes require HTTP Basic Auth via verify_admin dependency.
 """
 # ruff: noqa: B008  — Depends() in function defaults is standard FastAPI
@@ -8,11 +8,12 @@ All routes require HTTP Basic Auth via verify_admin dependency.
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,8 +31,15 @@ from src.admin.queries import (
     check_system_health,
     get_active_sessions,
     get_audit_log_paginated,
+    get_conversion_funnel,
+    get_daily_volume,
+    get_document_detail,
+    get_dti_histogram,
     get_gdpr_overview,
+    get_product_distribution,
     get_recent_alerts,
+    get_session_llm_events,
+    get_session_pipeline,
     get_sessions_paginated,
     get_today_stats,
     resolve_deletion_request,
@@ -184,13 +192,32 @@ async def health_page(
     request: Request,
     admin: str = Depends(verify_admin),
 ) -> HTMLResponse:
-    """System health — Ollama, DB, Redis status."""
+    """System health — LLM provider, DB, Redis status + token usage."""
     await _emit_access(admin, "health")
 
     health = await check_system_health()
 
+    # Server uptime
+    from datetime import datetime, timezone
+
+    started_at: datetime | None = getattr(request.app.state, "started_at", None)
+    if started_at:
+        delta = datetime.now(timezone.utc) - started_at
+        hours, remainder = divmod(int(delta.total_seconds()), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours > 0:
+            uptime_str = f"{hours}h {minutes}m {seconds}s"
+        elif minutes > 0:
+            uptime_str = f"{minutes}m {seconds}s"
+        else:
+            uptime_str = f"{seconds}s"
+    else:
+        uptime_str = "n/d"
+
     return templates.TemplateResponse(request, "health.html", {
         "health": health,
+        "server_uptime": uptime_str,
+        "server_started_at": started_at.strftime("%d/%m/%Y %H:%M:%S UTC") if started_at else "n/d",
     })
 
 
@@ -234,6 +261,243 @@ async def gdpr_page(
 
     return templates.TemplateResponse(request, "gdpr.html", {
         "gdpr": gdpr,
+    })
+
+
+# ── Analytics ─────────────────────────────────────────────────────────
+
+
+@router.get("/analytics", response_class=HTMLResponse)
+async def analytics_page(
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+    admin: str = Depends(verify_admin),
+) -> HTMLResponse:
+    """Analytics dashboard with Chart.js charts."""
+    await _emit_access(admin, "analytics")
+
+    daily = await get_daily_volume(db)
+    funnel = await get_conversion_funnel(db)
+    products = await get_product_distribution(db)
+    dti = await get_dti_histogram(db)
+
+    return templates.TemplateResponse(request, "analytics.html", {
+        "daily": daily,
+        "funnel": funnel,
+        "products": products,
+        "dti": dti,
+    })
+
+
+@router.get("/api/analytics")
+async def analytics_api(
+    db: AsyncSession = Depends(get_session),
+    admin: str = Depends(verify_admin),
+) -> JSONResponse:
+    """JSON endpoint returning all analytics datasets for chart refresh."""
+    daily = await get_daily_volume(db)
+    funnel = await get_conversion_funnel(db)
+    products = await get_product_distribution(db)
+    dti = await get_dti_histogram(db)
+
+    return JSONResponse({
+        "daily_volume": daily,
+        "conversion_funnel": funnel,
+        "product_distribution": products,
+        "dti_histogram": dti,
+    })
+
+
+# ── Pipeline ──────────────────────────────────────────────────────────
+
+
+@router.get("/pipeline/{session_id}", response_class=HTMLResponse)
+async def pipeline_page(
+    request: Request,
+    session_id: str,
+    db: AsyncSession = Depends(get_session),
+    admin: str = Depends(verify_admin),
+) -> HTMLResponse:
+    """Visual processing pipeline timeline for a session."""
+    await _emit_access(admin, "pipeline")
+
+    session = await resolve_session_id(db, session_id)
+    if session is None:
+        return templates.TemplateResponse(request, "pipeline.html", {
+            "session": None,
+            "session_id": session_id,
+            "events": [],
+        }, status_code=404)
+
+    events = await get_session_pipeline(db, session.id)
+
+    return templates.TemplateResponse(request, "pipeline.html", {
+        "session": session,
+        "session_id": session_id,
+        "events": events,
+    })
+
+
+# ── Raw LLM debug ────────────────────────────────────────────────────
+
+
+@router.get("/session/{session_id}/raw", response_class=HTMLResponse)
+async def session_raw_page(
+    request: Request,
+    session_id: str,
+    db: AsyncSession = Depends(get_session),
+    admin: str = Depends(verify_admin),
+) -> HTMLResponse:
+    """Raw LLM prompts/responses debug view for a session."""
+    await _emit_access(admin, "session_raw")
+
+    session = await resolve_session_id(db, session_id)
+    if session is None:
+        return templates.TemplateResponse(request, "session_raw.html", {
+            "session": None,
+            "session_id": session_id,
+            "llm_events": [],
+        }, status_code=404)
+
+    llm_events = await get_session_llm_events(db, session.id)
+
+    return templates.TemplateResponse(request, "session_raw.html", {
+        "session": session,
+        "session_id": session_id,
+        "llm_events": llm_events,
+    })
+
+
+# ── Document detail ───────────────────────────────────────────────────
+
+
+@router.get("/documents/{document_id}", response_class=HTMLResponse)
+async def document_detail_page(
+    request: Request,
+    document_id: str,
+    db: AsyncSession = Depends(get_session),
+    admin: str = Depends(verify_admin),
+) -> HTMLResponse:
+    """Single document OCR results viewer."""
+    await _emit_access(admin, "document_detail")
+
+    try:
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        return templates.TemplateResponse(request, "document_detail.html", {
+            "document": None,
+            "document_id": document_id,
+        }, status_code=404)
+
+    document = await get_document_detail(db, doc_uuid)
+
+    return templates.TemplateResponse(request, "document_detail.html", {
+        "document": document,
+        "document_id": document_id,
+    })
+
+
+# ── Eligibility rules viewer ─────────────────────────────────────────
+
+
+# Static display data for the 9 products and their rule conditions.
+# Built from inspecting the rule functions in src/eligibility/rules.py.
+RULES_DISPLAY: list[dict[str, Any]] = [
+    {
+        "product": "Cessione del Quinto Stipendio",
+        "sub_types": "Statale, Pubblico, Parapubblico, Privato",
+        "conditions": [
+            {"name": "Tipo impiego", "desc": "Lavoratore dipendente", "hard": True},
+            {"name": "Categoria datore", "desc": "Categoria datore di lavoro specificata", "hard": True},
+            {"name": "Capacità CdQ", "desc": "Capacità residua CdQ > 0 (1/5 stipendio netto)", "hard": True},
+            {"name": "Dimensione azienda", "desc": "Per privati: almeno 16 dipendenti", "hard": False},
+        ],
+    },
+    {
+        "product": "Cessione del Quinto Pensione",
+        "sub_types": "INPS, INPDAP, Altro ente",
+        "conditions": [
+            {"name": "Tipo impiego", "desc": "Pensionato", "hard": True},
+            {"name": "Cassa pensionistica", "desc": "Cassa pensionistica specificata", "hard": True},
+            {"name": "Capacità CdQ", "desc": "Capacità residua CdQ > 0 (1/5 pensione netta)", "hard": True},
+            {"name": "Età massima", "desc": "Età compatibile con durata minima (max 85 a fine piano)", "hard": True},
+        ],
+    },
+    {
+        "product": "Delegazione di Pagamento",
+        "sub_types": "Statale, Pubblico, Parapubblico, Privato",
+        "conditions": [
+            {"name": "Tipo impiego", "desc": "Lavoratore dipendente", "hard": True},
+            {"name": "Categoria datore", "desc": "Categoria datore di lavoro specificata", "hard": True},
+            {"name": "Capacità delega", "desc": "Capacità residua delega > 0 (1/5 stipendio netto)", "hard": True},
+            {"name": "Datore accetta delega", "desc": "Il datore di lavoro accetta la delegazione", "hard": False},
+        ],
+    },
+    {
+        "product": "Prestito Personale",
+        "sub_types": None,
+        "conditions": [
+            {"name": "Reddito minimo", "desc": "Reddito netto mensile >= €800", "hard": True},
+            {"name": "DTI", "desc": "Rapporto debiti/reddito <= 40%", "hard": True},
+            {"name": "Garante", "desc": "Per disoccupati: garante consigliato", "hard": False},
+        ],
+    },
+    {
+        "product": "Mutuo Acquisto",
+        "sub_types": None,
+        "conditions": [
+            {"name": "Reddito minimo", "desc": "Reddito netto mensile >= €1.000", "hard": True},
+            {"name": "DTI", "desc": "Rapporto debiti/reddito <= 35%", "hard": True},
+            {"name": "Tipo impiego", "desc": "Non disoccupato", "hard": True},
+        ],
+    },
+    {
+        "product": "Mutuo Surroga",
+        "sub_types": None,
+        "conditions": [
+            {"name": "Mutuo in corso", "desc": "Deve avere un mutuo esistente", "hard": True},
+            {"name": "Reddito minimo", "desc": "Reddito netto mensile >= €1.000", "hard": True},
+            {"name": "Tipo impiego", "desc": "Non disoccupato", "hard": True},
+        ],
+    },
+    {
+        "product": "Mutuo Consolidamento Debiti",
+        "sub_types": None,
+        "conditions": [
+            {"name": "Debiti multipli", "desc": "Almeno 2 finanziamenti in corso", "hard": True},
+            {"name": "DTI alto", "desc": "Rapporto debiti/reddito > 30% (altrimenti non conviene)", "hard": True},
+            {"name": "Tipo impiego", "desc": "Non disoccupato", "hard": True},
+        ],
+    },
+    {
+        "product": "Anticipo TFS/TFR",
+        "sub_types": None,
+        "conditions": [
+            {"name": "Tipo impiego", "desc": "Pensionato", "hard": True},
+            {"name": "Ex dipendente pubblico", "desc": "Deve essere ex dipendente pubblico", "hard": True},
+        ],
+    },
+    {
+        "product": "Credito Assicurativo",
+        "sub_types": None,
+        "conditions": [
+            {"name": "Tipo impiego", "desc": "Non disoccupato", "hard": True},
+            {"name": "Altri prodotti", "desc": "Idoneo per almeno un altro prodotto", "hard": True},
+        ],
+    },
+]
+
+
+@router.get("/rules", response_class=HTMLResponse)
+async def rules_page(
+    request: Request,
+    admin: str = Depends(verify_admin),
+) -> HTMLResponse:
+    """Read-only view of all 9 product eligibility rules."""
+    await _emit_access(admin, "rules")
+
+    return templates.TemplateResponse(request, "rules.html", {
+        "rules": RULES_DISPLAY,
     })
 
 

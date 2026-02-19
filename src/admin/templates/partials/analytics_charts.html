@@ -1,0 +1,8 @@
+<!-- HTMX partial for analytics chart data refresh.
+     Returns JSON data attributes that JavaScript can use to update charts. -->
+<div id="analytics-data"
+     data-daily="{{ daily | tojson }}"
+     data-funnel="{{ funnel | tojson }}"
+     data-products="{{ products | tojson }}"
+     data-dti="{{ dti | tojson }}">
+</div>

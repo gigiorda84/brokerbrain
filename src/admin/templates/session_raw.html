@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Debug LLM {{ session_id[:8] if session_id else '?' }} - BrokerBot Admin{% endblock %}
+
+{% block content %}
+{% if session is none %}
+<div class="bg-red-50 border border-red-200 rounded-lg p-6 text-center">
+    <p class="text-red-800 text-lg font-semibold">Sessione non trovata</p>
+    <p class="text-red-600 text-sm mt-2">ID: <code>{{ session_id }}</code></p>
+    <a href="/admin/sessions" class="mt-4 inline-block text-blue-600 hover:text-blue-800 text-sm">Torna alle sessioni</a>
+</div>
+{% else %}
+
+<!-- Header -->
+<div class="flex items-center justify-between mb-6">
+    <div>
+        <h2 class="text-2xl font-bold text-gray-800">Debug LLM</h2>
+        <p class="text-sm text-gray-500 font-mono mt-1">Sessione: {{ session.id }}</p>
+    </div>
+    <div class="flex space-x-3">
+        <a href="/admin/session/{{ session_id }}" class="text-sm text-blue-600 hover:text-blue-800">Dettaglio sessione</a>
+        <a href="/admin/pipeline/{{ session_id }}" class="text-sm text-blue-600 hover:text-blue-800">Pipeline</a>
+    </div>
+</div>
+
+{% if llm_events %}
+<div class="space-y-4">
+    {% for evt in llm_events %}
+    {% set data = evt.data or {} %}
+    {% set is_error = evt.event_type == 'llm.error' %}
+    {% set is_request = evt.event_type == 'llm.request' %}
+    {% set is_response = evt.event_type == 'llm.response' %}
+
+    <div class="bg-white rounded-lg shadow border-l-4
+        {% if is_error %}border-red-500
+        {% elif is_request %}border-blue-500
+        {% else %}border-green-500{% endif %}">
+
+        <!-- Header row -->
+        <div class="px-6 py-3 border-b border-gray-100 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
+                    {% if is_error %}bg-red-100 text-red-800
+                    {% elif is_request %}bg-blue-100 text-blue-800
+                    {% else %}bg-green-100 text-green-800{% endif %}">
+                    {% if is_request %}REQUEST
+                    {% elif is_response %}RESPONSE
+                    {% else %}ERROR{% endif %}
+                </span>
+                {% if data.get('model') %}
+                <span class="text-sm font-mono text-gray-600">{{ data.model }}</span>
+                {% endif %}
+                {% if data.get('prompt_hash') %}
+                <span class="text-xs text-gray-400 font-mono">#{{ data.prompt_hash[:8] }}</span>
+                {% endif %}
+            </div>
+            <span class="text-xs text-gray-400">{{ evt.created_at|datetime }}</span>
+        </div>
+
+        <!-- Metrics row -->
+        <div class="px-6 py-2 flex flex-wrap gap-4 text-xs text-gray-600 border-b border-gray-50">
+            {% if data.get('latency_ms') is not none %}
+            <span>Latenza: <strong>{{ data.latency_ms }}ms</strong></span>
+            {% endif %}
+            {% if data.get('message_count') is not none %}
+            <span>Messaggi: <strong>{{ data.message_count }}</strong></span>
+            {% endif %}
+            {% if data.get('prompt_tokens') is not none %}
+            <span>Prompt: <strong>{{ data.prompt_tokens }}</strong> token</span>
+            {% endif %}
+            {% if data.get('completion_tokens') is not none %}
+            <span>Completamento: <strong>{{ data.completion_tokens }}</strong> token</span>
+            {% endif %}
+            {% if data.get('total_tokens') is not none %}
+            <span>Totale: <strong>{{ data.total_tokens }}</strong> token</span>
+            {% endif %}
+        </div>
+
+        <!-- Error message if error -->
+        {% if is_error and data.get('error') %}
+        <div class="px-6 py-3 bg-red-50 text-red-700 text-sm">
+            {{ data.error }}
+        </div>
+        {% endif %}
+
+        <!-- Collapsible JSON payload -->
+        <details class="px-6 py-3">
+            <summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
+                Payload JSON completo
+            </summary>
+            <pre class="mt-2 text-xs bg-gray-50 rounded p-3 overflow-x-auto max-h-96 overflow-y-auto">{{ data | tojson(indent=2) }}</pre>
+        </details>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="bg-gray-50 border border-gray-200 rounded-lg p-6 text-center">
+    <p class="text-gray-600">Nessun evento LLM per questa sessione.</p>
+</div>
+{% endif %}
+
+{% endif %}
+{% endblock %}

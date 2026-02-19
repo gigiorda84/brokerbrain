@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Regole di idoneità - BrokerBot Admin{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+    <h2 class="text-2xl font-bold text-gray-800">Regole di idoneità</h2>
+    <p class="text-sm text-gray-500 mt-1">Visualizzazione di sola lettura delle regole per i 9 prodotti finanziari</p>
+</div>
+
+<div class="space-y-4">
+    {% for rule in rules %}
+    <details class="bg-white rounded-lg shadow group" {% if loop.first %}open{% endif %}>
+        <summary class="px-6 py-4 cursor-pointer flex items-center justify-between hover:bg-gray-50 rounded-lg">
+            <div class="flex items-center space-x-3">
+                <span class="text-lg font-semibold text-gray-800">{{ rule.product }}</span>
+                {% if rule.sub_types %}
+                <span class="text-xs text-gray-500">({{ rule.sub_types }})</span>
+                {% endif %}
+            </div>
+            <div class="flex items-center space-x-2">
+                <span class="text-xs text-gray-400">
+                    {{ rule.conditions | selectattr('hard', 'true') | list | length }} obbligatorie,
+                    {{ rule.conditions | rejectattr('hard', 'true') | list | length }} facoltative
+                </span>
+                <svg class="w-5 h-5 text-gray-400 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                </svg>
+            </div>
+        </summary>
+
+        <div class="px-6 pb-4 pt-0">
+            <div class="space-y-2">
+                {% for cond in rule.conditions %}
+                <div class="flex items-start space-x-3 p-3 rounded-lg border
+                    {% if cond.hard %}border-red-200 bg-red-50{% else %}border-yellow-200 bg-yellow-50{% endif %}">
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium mt-0.5
+                        {% if cond.hard %}bg-red-100 text-red-800{% else %}bg-yellow-100 text-yellow-800{% endif %}">
+                        {% if cond.hard %}HARD{% else %}SOFT{% endif %}
+                    </span>
+                    <div>
+                        <p class="text-sm font-medium text-gray-800">{{ cond.name }}</p>
+                        <p class="text-sm text-gray-600">{{ cond.desc }}</p>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </details>
+    {% endfor %}
+</div>
+
+<div class="mt-8 bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800">
+    <strong>Legenda:</strong>
+    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800 mx-1">HARD</span>
+    = condizione obbligatoria (se non soddisfatta, il prodotto non è idoneo).
+    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800 mx-1">SOFT</span>
+    = condizione consigliata (non blocca l'idoneità, ma segnalata come avvertimento).
+</div>
+{% endblock %}

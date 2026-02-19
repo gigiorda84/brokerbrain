@@ -12,6 +12,7 @@ import logging
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import structlog
 import uvicorn
@@ -54,6 +55,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application startup and shutdown lifecycle."""
     logger.info("Starting BrokerBot (env=%s)", settings.environment)
+    app.state.started_at = datetime.now(timezone.utc)
 
     # 1. Database
     async with db_lifespan():

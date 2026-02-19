@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}Pipeline {{ session_id[:8] if session_id else '?' }} - BrokerBot Admin{% endblock %}
+
+{% block content %}
+{% if session is none %}
+<div class="bg-red-50 border border-red-200 rounded-lg p-6 text-center">
+    <p class="text-red-800 text-lg font-semibold">Sessione non trovata</p>
+    <p class="text-red-600 text-sm mt-2">ID: <code>{{ session_id }}</code></p>
+    <a href="/admin/sessions" class="mt-4 inline-block text-blue-600 hover:text-blue-800 text-sm">Torna alle sessioni</a>
+</div>
+{% else %}
+
+<!-- Header -->
+<div class="flex items-center justify-between mb-6">
+    <div>
+        <h2 class="text-2xl font-bold text-gray-800">Pipeline di elaborazione</h2>
+        <p class="text-sm text-gray-500 font-mono mt-1">Sessione: {{ session.id }}</p>
+    </div>
+    <div class="flex space-x-3">
+        <a href="/admin/session/{{ session_id }}" class="text-sm text-blue-600 hover:text-blue-800">Dettaglio sessione</a>
+        <a href="/admin/session/{{ session_id }}/raw" class="text-sm text-blue-600 hover:text-blue-800">Debug LLM</a>
+    </div>
+</div>
+
+{% if events %}
+<!-- Timeline -->
+<div class="relative">
+    <!-- Vertical line -->
+    <div class="absolute left-6 top-0 bottom-0 w-0.5 bg-gray-300"></div>
+
+    <div class="space-y-4">
+        {% for evt in events %}
+        {% set evt_data = evt.data or {} %}
+        {% set is_error = 'error' in evt.event_type or 'failed' in evt.event_type %}
+        {% set is_success = 'completed' in evt.event_type or 'confirmed' in evt.event_type or 'granted' in evt.event_type %}
+        {% set is_warning = 'warning' in (evt_data.get('level', '') | default('', true)) %}
+        <div class="relative flex items-start pl-14">
+            <!-- Timeline dot -->
+            <div class="absolute left-4 w-4 h-4 rounded-full border-2 border-white
+                {% if is_error %}bg-red-500
+                {% elif is_success %}bg-green-500
+                {% elif is_warning %}bg-yellow-500
+                {% else %}bg-blue-500{% endif %}
+                shadow"></div>
+
+            <!-- Card -->
+            <div class="flex-1 bg-white rounded-lg shadow p-4 border-l-4
+                {% if is_error %}border-red-500
+                {% elif is_success %}border-green-500
+                {% elif is_warning %}border-yellow-500
+                {% else %}border-blue-500{% endif %}">
+
+                <div class="flex items-center justify-between mb-2">
+                    <div class="flex items-center space-x-2">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
+                            {% if is_error %}bg-red-100 text-red-800
+                            {% elif is_success %}bg-green-100 text-green-800
+                            {% elif is_warning %}bg-yellow-100 text-yellow-800
+                            {% else %}bg-blue-100 text-blue-800{% endif %}">
+                            {{ evt.event_type }}
+                        </span>
+                        {% if evt_data.get('model') %}
+                        <span class="text-xs text-gray-500 font-mono">{{ evt_data.model }}</span>
+                        {% endif %}
+                    </div>
+                    <div class="flex items-center space-x-3 text-xs text-gray-400">
+                        <span>{{ evt.created_at|datetime }}</span>
+                        {% if evt_data.get('latency_ms') %}
+                        <span class="font-medium text-gray-600">{{ evt_data.latency_ms }}ms</span>
+                        {% endif %}
+                        {% if evt_data.get('processing_time_ms') %}
+                        <span class="font-medium text-gray-600">{{ evt_data.processing_time_ms }}ms</span>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <!-- Key data from payload -->
+                <div class="flex flex-wrap gap-3 text-xs text-gray-600">
+                    {% if evt_data.get('confidence') %}
+                    <span>Confidenza: <strong>{{ '%.0f' | format(evt_data.confidence * 100) }}%</strong></span>
+                    {% endif %}
+                    {% if evt_data.get('overall_confidence') %}
+                    <span>Confidenza: <strong>{{ '%.0f' | format(evt_data.overall_confidence * 100) }}%</strong></span>
+                    {% endif %}
+                    {% if evt_data.get('doc_type') %}
+                    <span>Tipo doc: <strong>{{ evt_data.doc_type }}</strong></span>
+                    {% endif %}
+                    {% if evt_data.get('state') %}
+                    <span>Stato: <strong>{{ evt_data.state }}</strong></span>
+                    {% endif %}
+                    {% if evt_data.get('from_state') and evt_data.get('to_state') %}
+                    <span>{{ evt_data.from_state }} &rarr; {{ evt_data.to_state }}</span>
+                    {% endif %}
+                    {% if evt_data.get('field_name') %}
+                    <span>Campo: <strong>{{ evt_data.field_name }}</strong></span>
+                    {% endif %}
+                    {% if evt_data.get('eligible_count') is not none %}
+                    <span>Prodotti idonei: <strong>{{ evt_data.eligible_count }}</strong></span>
+                    {% endif %}
+                    {% if evt_data.get('current_dti') is not none %}
+                    <span>DTI: <strong>{{ '%.1f' | format(evt_data.current_dti * 100) }}%</strong></span>
+                    {% endif %}
+                    {% if evt_data.get('error') %}
+                    <span class="text-red-600">Errore: {{ evt_data.error }}</span>
+                    {% endif %}
+                    {% if evt_data.get('token_count') %}
+                    <span>Token: {{ evt_data.token_count }}</span>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% else %}
+<div class="bg-gray-50 border border-gray-200 rounded-lg p-6 text-center">
+    <p class="text-gray-600">Nessun evento di elaborazione per questa sessione.</p>
+</div>
+{% endif %}
+
+{% endif %}
+{% endblock %}

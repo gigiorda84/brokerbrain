@@ -16,7 +16,11 @@
         <h2 class="text-2xl font-bold text-gray-800">Sessione {{ session.id|string|truncate(8, True, '') }}</h2>
         <p class="text-sm text-gray-500 font-mono mt-1">{{ session.id }}</p>
     </div>
-    <a href="/admin/sessions" class="text-sm text-blue-600 hover:text-blue-800">Torna alle sessioni</a>
+    <div class="flex items-center space-x-3">
+        <a href="/admin/pipeline/{{ session.id }}" class="px-3 py-1.5 bg-blue-50 text-blue-700 text-sm rounded-lg hover:bg-blue-100">Pipeline</a>
+        <a href="/admin/session/{{ session.id }}/raw" class="px-3 py-1.5 bg-purple-50 text-purple-700 text-sm rounded-lg hover:bg-purple-100">Debug LLM</a>
+        <a href="/admin/sessions" class="text-sm text-blue-600 hover:text-blue-800">Torna alle sessioni</a>
+    </div>
 </div>
 
 <div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
@@ -208,8 +212,8 @@
         </thead>
         <tbody class="bg-white divide-y divide-gray-200">
             {% for doc in session.documents %}
-            <tr>
-                <td class="px-6 py-3 text-sm text-gray-800">{{ doc.doc_type or '-' }}</td>
+            <tr class="hover:bg-gray-50 cursor-pointer" onclick="window.location='/admin/documents/{{ doc.id }}'">
+                <td class="px-6 py-3 text-sm text-blue-600 hover:text-blue-800">{{ doc.doc_type or '-' }}</td>
                 <td class="px-6 py-3 text-sm">{{ doc.overall_confidence|confidence if doc.overall_confidence is not none else '-' }}</td>
                 <td class="px-6 py-3 text-sm text-gray-600">{{ '%dms' % doc.processing_time_ms if doc.processing_time_ms else '-' }}</td>
                 <td class="px-6 py-3 text-sm text-gray-600 font-mono">{{ doc.processing_model or '-' }}</td>
