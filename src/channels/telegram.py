@@ -71,10 +71,11 @@ async def _process_with_typing(
         async with async_session_factory() as db:
             response = await conversation_engine.process_message(
                 db=db,
-                telegram_id=telegram_id,
+                channel_user_id=telegram_id,
                 text=text,
                 first_name=first_name,
                 image_bytes=image_bytes,
+                channel="telegram",
             )
             await db.commit()
     except Exception:

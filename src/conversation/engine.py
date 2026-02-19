@@ -508,24 +508,35 @@ class ConversationEngine:
     async def get_or_create_user(
         self,
         db: AsyncSession,
-        telegram_id: str,
+        channel: str,
+        channel_user_id: str,
         first_name: str | None = None,
     ) -> User:
-        """Find or create a user by their Telegram ID."""
-        result = await db.execute(
-            select(User).where(User.telegram_id == telegram_id)
-        )
+        """Find or create a user by their channel-specific ID."""
+        if channel == "whatsapp":
+            result = await db.execute(
+                select(User).where(User.whatsapp_id == channel_user_id)
+            )
+        else:
+            result = await db.execute(
+                select(User).where(User.telegram_id == channel_user_id)
+            )
         user = result.scalar_one_or_none()
 
         if user is None:
-            user = User(
-                telegram_id=telegram_id,
-                first_name=first_name,
-                channel="telegram",
-            )
+            kwargs: dict[str, str | None] = {
+                "first_name": first_name,
+                "channel": channel,
+            }
+            if channel == "whatsapp":
+                kwargs["whatsapp_id"] = channel_user_id
+                kwargs["phone"] = channel_user_id
+            else:
+                kwargs["telegram_id"] = channel_user_id
+            user = User(**kwargs)
             db.add(user)
             await db.flush()
-            logger.info("Created new user: telegram_id=%s", telegram_id)
+            logger.info("Created new user: channel=%s, id=%s", channel, channel_user_id)
 
         return user
 
@@ -533,6 +544,7 @@ class ConversationEngine:
         self,
         db: AsyncSession,
         user: User,
+        channel: str = "telegram",
     ) -> SessionModel:
         """Find the user's active session or create a new one."""
         # Look for an active (non-terminal) session
@@ -571,7 +583,7 @@ class ConversationEngine:
                 event_type=EventType.SESSION_STARTED,
                 session_id=session.id,
                 user_id=user.id,
-                data={"channel": "telegram"},
+                data={"channel": channel},
                 source_module="conversation.engine",
             ))
             logger.info("Created new session: id=%s user=%s", session.id, user.id)
@@ -581,28 +593,30 @@ class ConversationEngine:
     async def process_message(
         self,
         db: AsyncSession,
-        telegram_id: str,
+        channel_user_id: str,
         text: str,
         first_name: str | None = None,
         image_bytes: bytes | None = None,
+        channel: str = "telegram",
     ) -> str:
         """Process an incoming message and return the bot's response.
 
-        This is the main entry point called by the Telegram channel adapter.
+        This is the main entry point called by channel adapters.
 
         Args:
             db: Database session.
-            telegram_id: Telegram user ID.
+            channel_user_id: Channel-specific user ID (Telegram ID or WhatsApp phone).
             text: The user's message text.
-            first_name: User's Telegram first name.
+            first_name: User's first name from the channel.
             image_bytes: Optional document image bytes for OCR processing.
+            channel: Channel identifier ("telegram" or "whatsapp").
 
         Returns:
             The bot's Italian response text (without the JSON action block).
         """
         # 1. Get or create user and session
-        user = await self.get_or_create_user(db, telegram_id, first_name)
-        session = await self.get_or_create_session(db, user)
+        user = await self.get_or_create_user(db, channel, channel_user_id, first_name)
+        session = await self.get_or_create_session(db, user, channel)
 
         # 2. Save incoming message
         msg_content = text or "[documento inviato]"

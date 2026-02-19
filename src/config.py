@@ -101,6 +101,7 @@ class WhatsAppSettings(BaseSettings):
     whatsapp_api_url: str = Field(default="", description="WhatsApp Business API URL")
     whatsapp_api_token: str = Field(default="", description="WhatsApp API token")
     whatsapp_verify_token: str = Field(default="", description="Webhook verification token")
+    whatsapp_app_secret: str = Field(default="", description="Meta app secret for X-Hub-Signature-256 verification")
 
 
 class SchedulingSettings(BaseSettings):

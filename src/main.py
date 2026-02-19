@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from src.admin.events import start_event_system, stop_event_system, subscribe
 from src.admin.web import router as admin_router
 from src.channels.telegram import create_telegram_app
+from src.channels.whatsapp import whatsapp_router
 from src.config import settings
 from src.db.engine import db_lifespan
 from src.llm.client import llm_client
@@ -127,6 +128,7 @@ app = FastAPI(
 )
 
 app.include_router(admin_router)
+app.include_router(whatsapp_router)
 
 
 @app.get("/health")

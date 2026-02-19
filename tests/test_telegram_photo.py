@@ -68,7 +68,8 @@ async def test_photo_downloads_largest_resolution(mock_db, mock_engine):
     mock_engine.process_message.assert_awaited_once()
     call_kwargs = mock_engine.process_message.call_args.kwargs
     assert call_kwargs["image_bytes"] == b"\xff\xd8fake-jpeg"
-    assert call_kwargs["telegram_id"] == "12345"
+    assert call_kwargs["channel_user_id"] == "12345"
+    assert call_kwargs["channel"] == "telegram"
     assert call_kwargs["text"] == "[documento inviato]"
 
 
