@@ -5,7 +5,7 @@
 <h2 class="text-2xl font-bold text-gray-800 mb-6">Dashboard</h2>
 
 <!-- Stats cards -->
-<div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+<div class="grid grid-cols-1 md:grid-cols-5 gap-6 mb-8">
     <div class="bg-white rounded-lg shadow p-6">
         <p class="text-sm text-gray-500 uppercase tracking-wide">Sessioni oggi</p>
         <p class="text-3xl font-bold text-gray-800 mt-2">{{ stats.total }}</p>
@@ -22,6 +22,11 @@
         <p class="text-sm text-gray-500 uppercase tracking-wide">Tasso qualificazione</p>
         <p class="text-3xl font-bold text-blue-600 mt-2">{{ stats.qual_rate|percentage }}</p>
     </div>
+    <div class="bg-white rounded-lg shadow p-6">
+        <p class="text-sm text-gray-500 uppercase tracking-wide">Lead da contattare</p>
+        <p class="text-3xl font-bold text-orange-600 mt-2">{{ pending_leads }}</p>
+        <a href="/admin/leads?status=pending" class="text-xs text-blue-600 hover:text-blue-800">Vedi tutti</a>
+    </div>
 </div>
 
 <!-- Active sessions -->
@@ -37,6 +42,57 @@
         {% include "partials/active_list.html" %}
     </div>
 </div>
+
+<!-- Recent leads -->
+{% if recent_leads %}
+<div class="bg-white rounded-lg shadow mb-8">
+    <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+        <h3 class="text-lg font-semibold text-gray-800">Lead recenti</h3>
+        <a href="/admin/leads" class="text-sm text-blue-600 hover:text-blue-800">Vedi tutti</a>
+    </div>
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Utente</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Telefono</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Prodotti</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stato</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Data</th>
+            </tr>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-200">
+            {% for lead in recent_leads %}
+            <tr class="hover:bg-gray-50 cursor-pointer" onclick="window.location='/admin/session/{{ lead.id }}'">
+                <td class="px-6 py-3 text-sm text-gray-800">
+                    {{ lead.user.first_name or '-' }}
+                    {% if lead.user.channel == 'whatsapp' %}
+                    <span class="text-green-500 ml-1" title="WhatsApp">&#9742;</span>
+                    {% else %}
+                    <span class="text-blue-500 ml-1" title="Telegram">&#9992;</span>
+                    {% endif %}
+                </td>
+                <td class="px-6 py-3 text-sm text-gray-600 font-mono">{{ lead.user.phone or '-' }}</td>
+                <td class="px-6 py-3 text-sm">
+                    {% for pm in lead.product_matches if pm.eligible %}
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800 mr-1">{{ pm.product_name }}</span>
+                    {% endfor %}
+                </td>
+                <td class="px-6 py-3 text-sm">
+                    {% if lead.appointments %}
+                    {% set appt = lead.appointments[-1] %}
+                    {% set status_colors = {'pending': 'bg-yellow-100 text-yellow-800', 'confirmed': 'bg-blue-100 text-blue-800', 'contacted': 'bg-indigo-100 text-indigo-800', 'completed': 'bg-green-100 text-green-800', 'no_show': 'bg-red-100 text-red-800', 'cancelled': 'bg-gray-100 text-gray-800'} %}
+                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {{ status_colors.get(appt.status, 'bg-gray-100 text-gray-800') }}">{{ appt.status }}</span>
+                    {% else %}
+                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">qualified</span>
+                    {% endif %}
+                </td>
+                <td class="px-6 py-3 text-sm text-gray-500">{{ lead.completed_at|datetime if lead.completed_at else lead.started_at|datetime }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
 
 <!-- Recent alerts -->
 <div class="bg-white rounded-lg shadow">

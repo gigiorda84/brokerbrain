@@ -25,6 +25,10 @@
                    class="flex items-center px-6 py-3 text-sm {{ 'bg-gray-800 text-white border-r-2 border-blue-400' if current_path == '/admin/' else 'text-gray-300 hover:bg-gray-800 hover:text-white' }}">
                     <span class="mr-3">&#9632;</span> Dashboard
                 </a>
+                <a href="/admin/leads"
+                   class="flex items-center px-6 py-3 text-sm {{ 'bg-gray-800 text-white border-r-2 border-blue-400' if '/leads' in current_path else 'text-gray-300 hover:bg-gray-800 hover:text-white' }}">
+                    <span class="mr-3">&#9742;</span> Leads
+                </a>
                 <a href="/admin/sessions"
                    class="flex items-center px-6 py-3 text-sm {{ 'bg-gray-800 text-white border-r-2 border-blue-400' if '/sessions' in current_path and '/session/' not in current_path else 'text-gray-300 hover:bg-gray-800 hover:text-white' }}">
                     <span class="mr-3">&#9776;</span> Sessioni

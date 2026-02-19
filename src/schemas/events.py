@@ -52,6 +52,7 @@ class EventType(str, Enum):
     DOSSIER_GENERATED = "dossier.generated"
 
     # Scheduling
+    LEAD_QUALIFIED = "lead.qualified"
     APPOINTMENT_REQUESTED = "appointment.requested"
     APPOINTMENT_BOOKED = "appointment.booked"
     APPOINTMENT_CANCELLED = "appointment.cancelled"

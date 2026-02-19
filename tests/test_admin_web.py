@@ -133,6 +133,9 @@ def mock_queries():
         patch("src.admin.web.check_system_health", new_callable=AsyncMock) as mock_health,
         patch("src.admin.web.get_audit_log_paginated", new_callable=AsyncMock) as mock_audit,
         patch("src.admin.web.get_gdpr_overview", new_callable=AsyncMock) as mock_gdpr,
+        patch("src.admin.web.get_pending_leads_count", new_callable=AsyncMock) as mock_pending_leads,
+        patch("src.admin.web.get_qualified_leads", new_callable=AsyncMock) as mock_qualified_leads,
+        patch("src.admin.web.update_appointment_status", new_callable=AsyncMock) as mock_update_appt,
         patch("src.admin.web.emit", new_callable=AsyncMock),
     ):
         mock_stats.return_value = {
@@ -171,6 +174,9 @@ def mock_queries():
             "with_consent": 45,
             "revoked": 3,
         }
+        mock_pending_leads.return_value = 0
+        mock_qualified_leads.return_value = ([], 0)
+        mock_update_appt.return_value = None
         yield {
             "stats": mock_stats,
             "active": mock_active,
@@ -180,6 +186,9 @@ def mock_queries():
             "health": mock_health,
             "audit": mock_audit,
             "gdpr": mock_gdpr,
+            "pending_leads": mock_pending_leads,
+            "qualified_leads": mock_qualified_leads,
+            "update_appt": mock_update_appt,
         }
 
 
@@ -313,4 +322,5 @@ def _make_session_mock():
     session.product_matches = []
     session.documents = []
     session.messages = []
+    session.appointments = []
     return session

@@ -20,6 +20,7 @@ from sqlalchemy.sql.expression import cast
 
 from src.config import settings
 from src.db.engine import async_session_factory, redis_client
+from src.models.appointment import Appointment
 from src.models.audit import AuditLog
 from src.models.consent import ConsentRecord
 from src.models.deletion import DataDeletionRequest
@@ -201,6 +202,7 @@ async def resolve_session_id(db: AsyncSession, id_str: str) -> Session | None:
                 selectinload(Session.product_matches),
                 selectinload(Session.documents),
                 selectinload(Session.messages),
+                selectinload(Session.appointments),
             )
         )
     else:
@@ -216,6 +218,7 @@ async def resolve_session_id(db: AsyncSession, id_str: str) -> Session | None:
                 selectinload(Session.product_matches),
                 selectinload(Session.documents),
                 selectinload(Session.messages),
+                selectinload(Session.appointments),
             )
         )
     return result.scalars().first()
@@ -593,3 +596,77 @@ async def get_document_detail(
         .options(_sel(Document.session))
     )
     return result.scalar_one_or_none()
+
+
+# ── Lead management queries ────────────────────────────────────────
+
+
+async def get_qualified_leads(
+    db: AsyncSession,
+    page: int = 1,
+    per_page: int = 25,
+    appointment_status: str | None = None,
+) -> tuple[list[Session], int]:
+    """Get sessions with outcome qualified/scheduled, with user + appointments + products.
+
+    Returns (sessions, total_count).
+    """
+    query = (
+        select(Session)
+        .where(Session.outcome.in_(["qualified", "scheduled"]))
+        .options(
+            selectinload(Session.user),
+            selectinload(Session.product_matches),
+            selectinload(Session.appointments),
+        )
+    )
+    count_query = select(func.count(Session.id)).where(
+        Session.outcome.in_(["qualified", "scheduled"])
+    )
+
+    if appointment_status:
+        query = query.join(Session.appointments).where(
+            Appointment.status == appointment_status
+        )
+        count_query = count_query.join(Session.appointments).where(
+            Appointment.status == appointment_status
+        )
+
+    result = await db.execute(count_query)
+    total = result.scalar() or 0
+
+    offset = (page - 1) * per_page
+    result = await db.execute(
+        query.order_by(Session.completed_at.desc().nulls_last()).offset(offset).limit(per_page)
+    )
+    sessions = list(result.scalars().unique().all())
+
+    return sessions, total  # type: ignore[return-value]
+
+
+async def get_pending_leads_count(db: AsyncSession) -> int:
+    """Count leads with pending appointments (for dashboard card)."""
+    result = await db.execute(
+        select(func.count(Appointment.id)).where(
+            Appointment.status == "pending"
+        )
+    )
+    return result.scalar() or 0
+
+
+async def update_appointment_status(
+    db: AsyncSession,
+    appointment_id: uuid.UUID,
+    new_status: str,
+) -> Appointment | None:
+    """Update appointment status. Returns updated appointment or None."""
+    result = await db.execute(
+        select(Appointment).where(Appointment.id == appointment_id)
+    )
+    appointment = result.scalar_one_or_none()
+    if appointment is None:
+        return None
+
+    appointment.status = new_status
+    await db.flush()
+    return appointment

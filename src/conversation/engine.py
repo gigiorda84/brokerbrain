@@ -31,8 +31,6 @@ from src.conversation.prompts.liabilities import LIABILITIES_PROMPT
 from src.conversation.prompts.manual_collection import MANUAL_COLLECTION_PROMPT
 from src.conversation.prompts.needs_assessment import NEEDS_ASSESSMENT_PROMPT
 from src.conversation.prompts.pension_class import PENSION_CLASS_PROMPT
-from src.conversation.prompts.result import RESULT_PROMPT
-from src.conversation.prompts.scheduling import SCHEDULING_PROMPT
 from src.conversation.prompts.track_choice import TRACK_CHOICE_PROMPT
 from src.conversation.prompts.welcome import WELCOME_PROMPT
 from src.db.engine import redis_client as _redis
@@ -56,7 +54,7 @@ from src.security.encryption import field_encryptor
 
 logger = logging.getLogger(__name__)
 
-# Map states to their system prompts (DOC_PROCESSING and CALCULATING are programmatic)
+# Map states to their system prompts (programmatic states handled without LLM)
 STATE_PROMPTS: dict[ConversationState, str] = {
     ConversationState.WELCOME: WELCOME_PROMPT,
     ConversationState.CONSENT: CONSENT_PROMPT,
@@ -69,14 +67,14 @@ STATE_PROMPTS: dict[ConversationState, str] = {
     ConversationState.MANUAL_COLLECTION: MANUAL_COLLECTION_PROMPT,
     ConversationState.HOUSEHOLD: HOUSEHOLD_PROMPT,
     ConversationState.LIABILITIES: LIABILITIES_PROMPT,
-    ConversationState.RESULT: RESULT_PROMPT,
-    ConversationState.SCHEDULING: SCHEDULING_PROMPT,
 }
 
 # States handled programmatically (no LLM call)
 PROGRAMMATIC_STATES: set[ConversationState] = {
     ConversationState.CALCULATING,
     ConversationState.DOC_PROCESSING,
+    ConversationState.RESULT,
+    ConversationState.SCHEDULING,
 }
 
 # Fallback prompt for states without a dedicated prompt yet
@@ -469,12 +467,12 @@ def _format_result_response(
         "La valutazione definitiva sar\u00e0 effettuata da un consulente di Primo Network Srl."
     )
 
-    # Next step
+    # Next step — numbered options for deterministic parsing
     parts.append("")
-    parts.append(
-        "Desidera fissare un appuntamento con un nostro consulente per approfondire? "
-        "Oppure le bastano queste informazioni per ora?"
-    )
+    parts.append("Cosa desidera fare?")
+    parts.append("")
+    parts.append("1. Fissare un appuntamento con un consulente")
+    parts.append("2. Per ora ho le informazioni che mi servono")
 
     return "\n".join(parts)
 
@@ -823,6 +821,10 @@ class ConversationEngine:
             return await self._handle_calculating(db, session, user, fsm)
         if state == ConversationState.DOC_PROCESSING:
             return await self._handle_doc_processing(db, session, user, fsm, text)
+        if state == ConversationState.RESULT:
+            return await self._handle_result_choice(db, session, user, fsm, text)
+        if state == ConversationState.SCHEDULING:
+            return await self._handle_scheduling(db, session, user, fsm, text)
         return (
             "Mi scusi, si è verificato un errore. "
             "Può chiamare il numero verde 800.99.00.90 per assistenza."
@@ -983,14 +985,7 @@ class ConversationEngine:
         outcome, reason = _determine_outcome(session)
         if trigger == "booked":
             outcome = SessionOutcome.SCHEDULED.value
-            # Create appointment from scheduling preferences
-            from src.scheduling.service import scheduling_service
-
-            try:
-                preferences = _extract_scheduling_preferences(session)
-                await scheduling_service.create_appointment(db, session, user, preferences)
-            except Exception:
-                logger.exception("Failed to create appointment for session %s", session.id)
+            # Appointment is created by _handle_scheduling; no need to duplicate here
         session.outcome = outcome
         session.outcome_reason = reason
         session.completed_at = datetime.now(UTC)
@@ -1082,6 +1077,232 @@ class ConversationEngine:
         return (
             "Mi scusi, non ho capito. I dati estratti dal documento sono corretti?\n\n"
             "Risponda con **sì** per confermare o **no** per riprovare."
+        )
+
+    async def _handle_result_choice(
+        self,
+        db: AsyncSession,
+        session: SessionModel,
+        user: User,
+        fsm: FSM,
+        text: str,
+    ) -> str:
+        """Handle user's choice after seeing eligibility results.
+
+        Deterministic: "1" or affirmative → SCHEDULING, "2" or negative → COMPLETED.
+        """
+        cleaned = text.strip().lower()
+
+        # Affirmative — schedule appointment
+        affirmative = cleaned in (
+            "1", "sì", "si", "yes", "appuntamento", "fissare", "consulente",
+            "si grazie", "sì grazie", "vorrei un appuntamento",
+        ) or cleaned.startswith("1")
+
+        # Negative — done
+        negative = cleaned in (
+            "2", "no", "basta", "per ora", "informazioni",
+            "no grazie", "basta così",
+        ) or cleaned.startswith("2")
+
+        if affirmative and fsm.can_transition("schedule"):
+            await fsm.transition("schedule")
+            session.current_state = fsm.current_state.value
+
+            # Emit lead qualified event
+            eligible_products = [pm.product_name for pm in session.product_matches if pm.eligible]
+            await emit(SystemEvent(
+                event_type=EventType.LEAD_QUALIFIED,
+                session_id=session.id,
+                user_id=user.id,
+                data={"eligible_products": eligible_products},
+                source_module="conversation.engine",
+            ))
+
+            # Check if phone already available
+            has_phone = bool(user.phone) or bool(_get_extracted_value(session, "phone_number"))
+            if has_phone:
+                # Skip phone step, go straight to time preference
+                ed = ExtractedData(
+                    session_id=session.id,
+                    field_name="scheduling_step",
+                    value="time",
+                    source=DataSource.COMPUTED.value,
+                    confidence=1.0,
+                )
+                db.add(ed)
+                return (
+                    "Perfetto! Quando preferisce essere ricontattato/a?\n\n"
+                    "1. Mattina (9:00-12:00)\n"
+                    "2. Pomeriggio (14:00-18:00)\n"
+                    "3. Qualsiasi orario"
+                )
+
+            # Need phone — mark scheduling step
+            ed = ExtractedData(
+                session_id=session.id,
+                field_name="scheduling_step",
+                value="phone",
+                source=DataSource.COMPUTED.value,
+                confidence=1.0,
+            )
+            db.add(ed)
+            return "Per poterla ricontattare, mi indica il suo numero di telefono?"
+
+        if negative and fsm.can_transition("done"):
+            await fsm.transition("done")
+            session.current_state = fsm.current_state.value
+            await self._handle_session_completed(db, session, user, trigger="skip")
+            return (
+                "Capito! Se in futuro desidera approfondire, può sempre contattarci "
+                "al numero verde 800.99.00.90.\n\n"
+                "Grazie per aver utilizzato ameconviene.it e buona giornata!"
+            )
+
+        # Ambiguous — re-ask
+        return (
+            "Mi scusi, non ho capito. Cosa desidera fare?\n\n"
+            "1. Fissare un appuntamento con un consulente\n"
+            "2. Per ora ho le informazioni che mi servono"
+        )
+
+    async def _handle_scheduling(
+        self,
+        db: AsyncSession,
+        session: SessionModel,
+        user: User,
+        fsm: FSM,
+        text: str,
+    ) -> str:
+        """Handle the multi-step scheduling flow: phone → time → confirm.
+
+        Sub-state tracked via ExtractedData(field_name="scheduling_step").
+        """
+        step = _get_extracted_value(session, "scheduling_step") or "phone"
+        cleaned = text.strip()
+
+        if step == "phone":
+            return await self._scheduling_collect_phone(db, session, user, cleaned)
+
+        if step == "time":
+            return await self._scheduling_collect_time(db, session, user, fsm, cleaned)
+
+        # Shouldn't reach here, but handle gracefully
+        return await self._scheduling_collect_time(db, session, user, fsm, cleaned)
+
+    async def _scheduling_collect_phone(
+        self,
+        db: AsyncSession,
+        session: SessionModel,
+        user: User,
+        text: str,
+    ) -> str:
+        """Collect and validate phone number in scheduling flow."""
+        import re
+
+        # Strip common formatting
+        phone = re.sub(r"[\s\-\.\(\)/+]", "", text)
+
+        # Accept Italian mobile: 3xx... (10 digits) or with +39 prefix
+        if phone.startswith("39") and len(phone) == 12:
+            phone = phone[2:]
+        if phone.startswith("0039") and len(phone) == 14:
+            phone = phone[4:]
+
+        if not (phone.startswith("3") and len(phone) == 10 and phone.isdigit()):
+            return (
+                "Il numero inserito non sembra valido. "
+                "Inserisca un numero di cellulare italiano (es. 3401234567)."
+            )
+
+        # Store phone
+        user.phone = phone
+        ed_phone = ExtractedData(
+            session_id=session.id,
+            field_name="phone_number",
+            value=field_encryptor.encrypt(phone),
+            value_encrypted=True,
+            source=DataSource.SELF_DECLARED.value,
+            confidence=1.0,
+        )
+        db.add(ed_phone)
+
+        # Advance to time step — update scheduling_step
+        for ed in session.extracted_data:
+            if ed.field_name == "scheduling_step":
+                ed.value = "time"
+                break
+
+        return (
+            "Quando preferisce essere ricontattato/a?\n\n"
+            "1. Mattina (9:00-12:00)\n"
+            "2. Pomeriggio (14:00-18:00)\n"
+            "3. Qualsiasi orario"
+        )
+
+    async def _scheduling_collect_time(
+        self,
+        db: AsyncSession,
+        session: SessionModel,
+        user: User,
+        fsm: FSM,
+        text: str,
+    ) -> str:
+        """Collect time preference and finalize appointment."""
+        cleaned = text.strip().lower()
+
+        time_map = {
+            "1": "mattina (9:00-12:00)",
+            "mattina": "mattina (9:00-12:00)",
+            "2": "pomeriggio (14:00-18:00)",
+            "pomeriggio": "pomeriggio (14:00-18:00)",
+            "3": "qualsiasi orario",
+            "qualsiasi": "qualsiasi orario",
+        }
+
+        time_pref = None
+        for key, value in time_map.items():
+            if cleaned.startswith(key):
+                time_pref = value
+                break
+
+        if time_pref is None:
+            return (
+                "Mi scusi, non ho capito. Quando preferisce essere ricontattato/a?\n\n"
+                "1. Mattina (9:00-12:00)\n"
+                "2. Pomeriggio (14:00-18:00)\n"
+                "3. Qualsiasi orario"
+            )
+
+        # Store time preference
+        ed_time = ExtractedData(
+            session_id=session.id,
+            field_name="preferred_time",
+            value=time_pref,
+            source=DataSource.SELF_DECLARED.value,
+            confidence=1.0,
+        )
+        db.add(ed_time)
+
+        # Get phone for confirmation message
+        phone = user.phone or _get_extracted_value(session, "phone_number") or "il numero fornito"
+
+        # Create appointment
+        from src.scheduling.service import scheduling_service
+        preferences = {"preferred_time": time_pref, "contact_method": "telefono"}
+        await scheduling_service.create_appointment(db, session, user, preferences)
+
+        # Transition SCHEDULING → COMPLETED
+        if fsm.can_transition("booked"):
+            await fsm.transition("booked")
+            session.current_state = fsm.current_state.value
+
+        await self._handle_session_completed(db, session, user, trigger="booked")
+
+        return (
+            f"Perfetto! Un consulente Primo Network la ricontatterà "
+            f"al numero {phone} ({time_pref}).\n\n"
+            "Grazie per aver utilizzato ameconviene.it!"
         )
 
     async def _handle_ocr_upload(

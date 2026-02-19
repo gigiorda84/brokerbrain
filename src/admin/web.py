@@ -36,7 +36,9 @@ from src.admin.queries import (
     get_document_detail,
     get_dti_histogram,
     get_gdpr_overview,
+    get_pending_leads_count,
     get_product_distribution,
+    get_qualified_leads,
     get_recent_alerts,
     get_session_llm_events,
     get_session_pipeline,
@@ -44,6 +46,7 @@ from src.admin.queries import (
     get_today_stats,
     resolve_deletion_request,
     resolve_session_id,
+    update_appointment_status,
 )
 from src.db.engine import get_session
 from src.schemas.events import EventType, SystemEvent
@@ -104,11 +107,15 @@ async def dashboard(
     stats = await get_today_stats(db)
     active = await get_active_sessions(db)
     alerts = await get_recent_alerts(db)
+    pending_leads = await get_pending_leads_count(db)
+    recent_leads, _ = await get_qualified_leads(db, page=1, per_page=5)
 
     return templates.TemplateResponse(request, "dashboard.html", {
         "stats": stats,
         "active_sessions": active,
         "alerts": alerts,
+        "pending_leads": pending_leads,
+        "recent_leads": recent_leads,
     })
 
 
@@ -139,6 +146,86 @@ async def sessions_list(
         "outcome": outcome or "",
         "employment_type": employment_type or "",
     })
+
+
+@router.get("/leads", response_class=HTMLResponse)
+async def leads_page(
+    request: Request,
+    page: int = Query(1, ge=1),
+    status: str | None = Query(None),
+    db: AsyncSession = Depends(get_session),
+    admin: str = Depends(verify_admin),
+) -> HTMLResponse:
+    """Qualified leads list with appointment status."""
+    await _emit_access(admin, "leads")
+
+    leads, total = await get_qualified_leads(
+        db, page=page, appointment_status=status or None
+    )
+    per_page = 25
+    total_pages = max(1, (total + per_page - 1) // per_page)
+
+    return templates.TemplateResponse(request, "leads.html", {
+        "leads": leads,
+        "total": total,
+        "page": page,
+        "total_pages": total_pages,
+        "pages": _page_range(page, total_pages),
+        "status": status or "",
+    })
+
+
+@router.post("/leads/{appointment_id}/status", response_class=HTMLResponse)
+async def update_lead_status(
+    request: Request,
+    appointment_id: str,
+    db: AsyncSession = Depends(get_session),
+    admin: str = Depends(verify_admin),
+) -> HTMLResponse:
+    """HTMX endpoint — update appointment status, return badge HTML."""
+    await _emit_access(admin, "lead_status_update")
+
+    form = await request.form()
+    new_status = str(form.get("status", ""))
+
+    valid_statuses = {"pending", "confirmed", "contacted", "completed", "no_show", "cancelled"}
+    if new_status not in valid_statuses:
+        return HTMLResponse(
+            '<span class="text-red-600 text-sm">Stato non valido</span>',
+            status_code=400,
+        )
+
+    try:
+        appt_uuid = uuid.UUID(appointment_id)
+    except ValueError:
+        return HTMLResponse(
+            '<span class="text-red-600 text-sm">ID non valido</span>',
+            status_code=400,
+        )
+
+    appointment = await update_appointment_status(db, appt_uuid, new_status)
+    if appointment is None:
+        return HTMLResponse(
+            '<span class="text-red-600 text-sm">Appuntamento non trovato</span>',
+            status_code=404,
+        )
+
+    await db.commit()
+
+    status_colors = {
+        "pending": "bg-yellow-100 text-yellow-800",
+        "confirmed": "bg-blue-100 text-blue-800",
+        "contacted": "bg-indigo-100 text-indigo-800",
+        "completed": "bg-green-100 text-green-800",
+        "no_show": "bg-red-100 text-red-800",
+        "cancelled": "bg-gray-100 text-gray-800",
+    }
+    color = status_colors.get(new_status, "bg-gray-100 text-gray-800")
+
+    return HTMLResponse(
+        f'<span class="inline-flex items-center px-2.5 py-0.5 rounded-full '
+        f'text-xs font-medium {color}">{new_status}</span>'
+    )
 
 
 @router.get("/session/{session_id}", response_class=HTMLResponse)

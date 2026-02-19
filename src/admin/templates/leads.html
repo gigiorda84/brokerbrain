@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Leads - BrokerBot Admin{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+    <h2 class="text-2xl font-bold text-gray-800">Leads qualificati</h2>
+    <span class="text-sm text-gray-500">{{ total }} lead totali</span>
+</div>
+
+<!-- Filters -->
+<div class="bg-white rounded-lg shadow p-4 mb-6 flex items-center space-x-4">
+    <span class="text-sm text-gray-600 font-medium">Filtra per stato:</span>
+    <a href="/admin/leads"
+       class="px-3 py-1 rounded text-sm {{ 'bg-gray-800 text-white' if not status else 'bg-gray-100 text-gray-700 hover:bg-gray-200' }}">Tutti</a>
+    <a href="/admin/leads?status=pending"
+       class="px-3 py-1 rounded text-sm {{ 'bg-yellow-200 text-yellow-900' if status == 'pending' else 'bg-yellow-50 text-yellow-700 hover:bg-yellow-100' }}">Pending</a>
+    <a href="/admin/leads?status=confirmed"
+       class="px-3 py-1 rounded text-sm {{ 'bg-blue-200 text-blue-900' if status == 'confirmed' else 'bg-blue-50 text-blue-700 hover:bg-blue-100' }}">Confirmed</a>
+    <a href="/admin/leads?status=completed"
+       class="px-3 py-1 rounded text-sm {{ 'bg-green-200 text-green-900' if status == 'completed' else 'bg-green-50 text-green-700 hover:bg-green-100' }}">Completed</a>
+    <a href="/admin/leads?status=no_show"
+       class="px-3 py-1 rounded text-sm {{ 'bg-red-200 text-red-900' if status == 'no_show' else 'bg-red-50 text-red-700 hover:bg-red-100' }}">No show</a>
+</div>
+
+<!-- Leads table -->
+<div class="bg-white rounded-lg shadow">
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Utente</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Telefono</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Impiego</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Prodotti idonei</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stato appuntamento</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Preferenza orario</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Data</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Azioni</th>
+            </tr>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-200">
+            {% for lead in leads %}
+            {% set appt = lead.appointments[-1] if lead.appointments else None %}
+            <tr class="hover:bg-gray-50">
+                <td class="px-6 py-3 text-sm text-gray-800">
+                    {{ lead.user.first_name or '-' }}
+                    {% if lead.user.channel == 'whatsapp' %}
+                    <span class="text-green-500 ml-1" title="WhatsApp">&#9742;</span>
+                    {% else %}
+                    <span class="text-blue-500 ml-1" title="Telegram">&#9992;</span>
+                    {% endif %}
+                </td>
+                <td class="px-6 py-3 text-sm text-gray-600 font-mono">{{ lead.user.phone or '-' }}</td>
+                <td class="px-6 py-3 text-sm text-gray-600">{{ lead.employment_type or '-' }}</td>
+                <td class="px-6 py-3 text-sm">
+                    {% for pm in lead.product_matches if pm.eligible %}
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800 mr-1 mb-1">{{ pm.product_name }}</span>
+                    {% endfor %}
+                </td>
+                <td class="px-6 py-3 text-sm">
+                    {% if appt %}
+                    {% set status_colors = {'pending': 'bg-yellow-100 text-yellow-800', 'confirmed': 'bg-blue-100 text-blue-800', 'contacted': 'bg-indigo-100 text-indigo-800', 'completed': 'bg-green-100 text-green-800', 'no_show': 'bg-red-100 text-red-800', 'cancelled': 'bg-gray-100 text-gray-800'} %}
+                    <span id="status-{{ appt.id }}" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {{ status_colors.get(appt.status, 'bg-gray-100 text-gray-800') }}">{{ appt.status }}</span>
+                    {% else %}
+                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">qualified</span>
+                    {% endif %}
+                </td>
+                <td class="px-6 py-3 text-sm text-gray-600">
+                    {% if appt and appt.notes %}{{ appt.notes }}{% else %}-{% endif %}
+                </td>
+                <td class="px-6 py-3 text-sm text-gray-500">{{ lead.completed_at|datetime if lead.completed_at else lead.started_at|datetime }}</td>
+                <td class="px-6 py-3 text-sm">
+                    <div class="flex items-center space-x-2">
+                        <a href="/admin/session/{{ lead.id }}" class="text-blue-600 hover:text-blue-800 text-xs">Dettaglio</a>
+                        {% if appt and appt.status == 'pending' %}
+                        <form hx-post="/admin/leads/{{ appt.id }}/status" hx-target="#status-{{ appt.id }}" hx-swap="outerHTML" class="inline">
+                            <input type="hidden" name="status" value="contacted">
+                            <button type="submit" class="text-indigo-600 hover:text-indigo-800 text-xs">Contattato</button>
+                        </form>
+                        {% endif %}
+                        {% if appt and appt.status in ['pending', 'confirmed', 'contacted'] %}
+                        <form hx-post="/admin/leads/{{ appt.id }}/status" hx-target="#status-{{ appt.id }}" hx-swap="outerHTML" class="inline">
+                            <input type="hidden" name="status" value="completed">
+                            <button type="submit" class="text-green-600 hover:text-green-800 text-xs">Completato</button>
+                        </form>
+                        <form hx-post="/admin/leads/{{ appt.id }}/status" hx-target="#status-{{ appt.id }}" hx-swap="outerHTML" class="inline">
+                            <input type="hidden" name="status" value="no_show">
+                            <button type="submit" class="text-red-600 hover:text-red-800 text-xs">No show</button>
+                        </form>
+                        {% endif %}
+                    </div>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="8" class="px-6 py-8 text-center text-sm text-gray-500">Nessun lead qualificato trovato.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Pagination -->
+{% if total_pages > 1 %}
+<div class="flex justify-center mt-6">
+    <nav class="inline-flex rounded-md shadow-sm -space-x-px">
+        {% if page > 1 %}
+        <a href="/admin/leads?page={{ page - 1 }}{% if status %}&status={{ status }}{% endif %}"
+           class="relative inline-flex items-center px-3 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50">&laquo;</a>
+        {% endif %}
+        {% for p in pages %}
+        <a href="/admin/leads?page={{ p }}{% if status %}&status={{ status }}{% endif %}"
+           class="relative inline-flex items-center px-4 py-2 border text-sm font-medium {{ 'bg-blue-600 text-white border-blue-600' if p == page else 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50' }}">{{ p }}</a>
+        {% endfor %}
+        {% if page < total_pages %}
+        <a href="/admin/leads?page={{ page + 1 }}{% if status %}&status={{ status }}{% endif %}"
+           class="relative inline-flex items-center px-3 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50">&raquo;</a>
+        {% endif %}
+    </nav>
+</div>
+{% endif %}
+{% endblock %}
