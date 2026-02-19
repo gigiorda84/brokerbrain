@@ -131,6 +131,18 @@ class SchedulingSettings(BaseSettings):
     calcom_api_key: str = Field(default="", description="Cal.com API key")
 
 
+class RateLimitSettings(BaseSettings):
+    """Rate limiting thresholds."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    message_rate_limit: int = Field(default=15, description="Max messages per window")
+    message_rate_window: int = Field(default=60, description="Message window in seconds")
+    upload_rate_limit: int = Field(default=5, description="Max uploads per window")
+    upload_rate_window: int = Field(default=60, description="Upload window in seconds")
+    upload_max_size_bytes: int = Field(default=5_242_880, description="Max upload size (5 MB)")
+
+
 class SecuritySettings(BaseSettings):
     """Encryption and authentication settings."""
 
@@ -180,6 +192,7 @@ class Settings(BaseSettings):
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     whatsapp: WhatsAppSettings = Field(default_factory=WhatsAppSettings)
     scheduling: SchedulingSettings = Field(default_factory=SchedulingSettings)
+    rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     branding: BrandingSettings = Field(default_factory=BrandingSettings)
 

@@ -10,7 +10,7 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Request, Response
-from sqlalchemy import func, select
+from sqlalchemy import select
 from telegram import Bot, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -28,10 +28,38 @@ from src.models.deletion import DataDeletionRequest
 from src.models.enums import ConversationState, DeletionRequestStatus, SessionOutcome
 from src.models.session import Session
 from src.models.user import User
-from src.security.consent import consent_manager
+from src.security.data_export import export_user_data
 from src.security.erasure import erasure_processor
+from src.security.rate_limiter import rate_limiter
 
 logger = logging.getLogger(__name__)
+
+_rl = settings.rate_limit
+
+
+async def _check_msg_rate(update: Update, telegram_id: str) -> bool:
+    """Check message rate limit. Returns True if allowed, sends rejection and returns False if not."""
+    allowed, retry_after = await rate_limiter.check(
+        f"rate:{telegram_id}:msg", _rl.message_rate_limit, _rl.message_rate_window
+    )
+    if not allowed and update.message:
+        await update.message.reply_text(
+            f"Ha inviato troppi messaggi. Riprovi tra {retry_after} secondi."
+        )
+    return allowed
+
+
+async def _check_upload_rate(update: Update, telegram_id: str) -> bool:
+    """Check upload rate limit. Returns True if allowed."""
+    allowed, retry_after = await rate_limiter.check(
+        f"rate:{telegram_id}:upload", _rl.upload_rate_limit, _rl.upload_rate_window
+    )
+    if not allowed and update.message:
+        await update.message.reply_text(
+            f"Ha inviato troppi documenti. Riprovi tra {retry_after} secondi."
+        )
+    return allowed
+
 
 # ── Webhook router ───────────────────────────────────────────────────
 
@@ -159,6 +187,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if update.effective_user is None or update.message is None:
         return
     telegram_id = str(update.effective_user.id)
+    if not await _check_msg_rate(update, telegram_id):
+        return
     await _close_active_session(telegram_id)
     await _process_with_typing(update, context, "/start", update.effective_user.first_name)
 
@@ -168,6 +198,8 @@ async def nuova_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if update.effective_user is None or update.message is None:
         return
     telegram_id = str(update.effective_user.id)
+    if not await _check_msg_rate(update, telegram_id):
+        return
     closed = await _close_active_session(telegram_id)
     if closed:
         await update.message.reply_text("Sessione precedente chiusa. Iniziamo da capo!")
@@ -179,12 +211,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if update.effective_user is None or update.message is None or update.message.text is None:
         return
 
+    telegram_id = str(update.effective_user.id)
+    if not await _check_msg_rate(update, telegram_id):
+        return
+
     # Check for pending deletion confirmation
     if context.user_data.get("awaiting_deletion_confirm"):  # type: ignore[union-attr]
         context.user_data["awaiting_deletion_confirm"] = False  # type: ignore[index]
 
         if update.message.text.strip().upper() == "CONFERMO":
-            telegram_id = str(update.effective_user.id)
             try:
                 async with async_session_factory() as db:
                     user = await _find_user_by_telegram_id(db, telegram_id)
@@ -234,11 +269,30 @@ async def handle_photo_document(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     telegram_id = str(update.effective_user.id)
+    if not await _check_upload_rate(update, telegram_id):
+        return
+
+    # Check file size before downloading (Telegram provides it for documents)
+    max_bytes = _rl.upload_max_size_bytes
+    file_size: int | None = None
+    if update.message.document and isinstance(update.message.document.file_size, int):
+        file_size = update.message.document.file_size
+    elif update.message.photo:
+        photo = update.message.photo[-1]
+        if isinstance(photo.file_size, int):
+            file_size = photo.file_size
+
+    if file_size is not None and file_size > max_bytes:
+        max_mb = max_bytes // (1024 * 1024)
+        await update.message.reply_text(
+            f"Il file e' troppo grande (max {max_mb} MB). Invii un'immagine piu' leggera."
+        )
+        return
+
     text = update.message.caption or "[documento inviato]"
 
     try:
         if update.message.photo:
-            # Grab the highest-resolution variant (last in list)
             file = await update.message.photo[-1].get_file()
         elif update.message.document:
             file = await update.message.document.get_file()
@@ -349,11 +403,13 @@ async def elimina_dati_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def i_miei_dati_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/i_miei_dati — view personal data summary (GDPR Art. 15)."""
+    """/i_miei_dati — full personal data export (GDPR Art. 15)."""
     if update.effective_user is None or update.message is None:
         return
 
     telegram_id = str(update.effective_user.id)
+    if not await _check_msg_rate(update, telegram_id):
+        return
 
     async with async_session_factory() as db:
         user = await _find_user_by_telegram_id(db, telegram_id)
@@ -363,42 +419,10 @@ async def i_miei_dati_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
 
-        # Get consent status
-        consent_status = await consent_manager.get_consent_status(db, user.id)
+        chunks = await export_user_data(db, user)
 
-        # Count sessions
-        session_count_result = await db.execute(
-            select(func.count(Session.id)).where(Session.user_id == user.id)
-        )
-        session_count = session_count_result.scalar() or 0
-
-    # Build summary
-    consent_labels = {
-        "privacy_policy": "Privacy policy",
-        "data_processing": "Trattamento dati",
-        "marketing": "Marketing",
-        "third_party": "Terze parti",
-    }
-    consent_lines = []
-    for key, label in consent_labels.items():
-        status = consent_status.get(key, False)
-        icon = "Si'" if status else "No"
-        consent_lines.append(f"  - {label}: {icon}")
-
-    reg_date = user.created_at.strftime("%d/%m/%Y") if user.created_at else "N/D"
-
-    await update.message.reply_text(
-        "I suoi dati presso ameconviene.it:\n\n"
-        f"Nome: {user.first_name or 'N/D'} {user.last_name or ''}\n"
-        f"Canale: {user.channel}\n"
-        f"Registrazione: {reg_date}\n"
-        f"Sessioni: {session_count}\n\n"
-        "Consensi:\n"
-        + "\n".join(consent_lines)
-        + "\n\n"
-        "Per richiedere la cancellazione dei dati: /elimina_dati\n"
-        "Per assistenza: privacy@primonetwork.it"
-    )
+    for chunk in chunks:
+        await update.message.reply_text(chunk)
 
 
 def create_telegram_app() -> Application:

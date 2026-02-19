@@ -44,6 +44,13 @@ def mock_engine():
         yield engine
 
 
+@pytest.fixture(autouse=True)
+def mock_rate_limiter():
+    with patch("src.channels.telegram.rate_limiter") as rl:
+        rl.check = AsyncMock(return_value=(True, 0))
+        yield rl
+
+
 @pytest.fixture()
 def mock_db():
     with patch("src.channels.telegram.async_session_factory") as factory:

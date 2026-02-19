@@ -17,14 +17,15 @@ import logging
 import httpx
 from fastapi import APIRouter, Query, Request, Response
 
+from sqlalchemy import select
+
 from src.config import settings
 from src.conversation.engine import conversation_engine
 from src.db.engine import async_session_factory
 from src.models.enums import ConversationState, SessionOutcome
 from src.models.session import Session
 from src.models.user import User
-
-from sqlalchemy import select
+from src.security.rate_limiter import rate_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,8 @@ async def _handle_whatsapp_message(
     msg_type = message.get("type", "")
     first_name = contact_names.get(wa_id, "")
 
+    _rl = settings.rate_limit
+
     text = ""
     image_bytes: bytes | None = None
 
@@ -163,16 +166,30 @@ async def _handle_whatsapp_message(
             text = interactive.get("button_reply", {}).get("title", "")
         elif interactive_type == "list_reply":
             text = interactive.get("list_reply", {}).get("title", "")
-    elif msg_type == "image":
-        media_id = message.get("image", {}).get("id", "")
-        text = message.get("image", {}).get("caption", "[documento inviato]")
+    elif msg_type in ("image", "document"):
+        # Rate limit uploads
+        allowed, retry_after = await rate_limiter.check(
+            f"rate:{wa_id}:upload", _rl.upload_rate_limit, _rl.upload_rate_window
+        )
+        if not allowed:
+            await send_whatsapp_message(
+                wa_id, f"Ha inviato troppi documenti. Riprovi tra {retry_after} secondi."
+            )
+            return
+
+        media_key = "image" if msg_type == "image" else "document"
+        media_id = message.get(media_key, {}).get("id", "")
+        text = message.get(media_key, {}).get("caption", "[documento inviato]")
         if media_id:
             image_bytes = await _download_whatsapp_media(media_id)
-    elif msg_type == "document":
-        media_id = message.get("document", {}).get("id", "")
-        text = message.get("document", {}).get("caption", "[documento inviato]")
-        if media_id:
-            image_bytes = await _download_whatsapp_media(media_id)
+            # Check downloaded size (WhatsApp doesn't expose size pre-download)
+            if image_bytes and len(image_bytes) > _rl.upload_max_size_bytes:
+                max_mb = _rl.upload_max_size_bytes // (1024 * 1024)
+                await send_whatsapp_message(
+                    wa_id,
+                    f"Il file e' troppo grande (max {max_mb} MB). Invii un'immagine piu' leggera.",
+                )
+                return
     else:
         # Unsupported message type — send a helpful fallback
         await send_whatsapp_message(
@@ -184,6 +201,17 @@ async def _handle_whatsapp_message(
 
     if not text and image_bytes is None:
         return
+
+    # Rate limit text messages (skip for uploads already checked above)
+    if image_bytes is None:
+        allowed, retry_after = await rate_limiter.check(
+            f"rate:{wa_id}:msg", _rl.message_rate_limit, _rl.message_rate_window
+        )
+        if not allowed:
+            await send_whatsapp_message(
+                wa_id, f"Ha inviato troppi messaggi. Riprovi tra {retry_after} secondi."
+            )
+            return
 
     # Map WhatsApp keyword "commands" (no /commands on WhatsApp)
     text_lower = text.strip().lower()
@@ -207,6 +235,9 @@ async def _handle_whatsapp_message(
             "La richiesta sarà elaborata entro 30 giorni.",
         )
         return
+    elif text_lower == "miei dati":
+        await _handle_whatsapp_miei_dati(wa_id)
+        return
 
     # Process through conversation engine
     try:
@@ -228,6 +259,29 @@ async def _handle_whatsapp_message(
         )
 
     await send_whatsapp_message(wa_id, response)
+
+
+# ── GDPR data export ─────────────────────────────────────────────────
+
+
+async def _handle_whatsapp_miei_dati(wa_id: str) -> None:
+    """Handle "miei dati" keyword — GDPR Art. 15 data export."""
+    from src.security.data_export import export_user_data
+
+    async with async_session_factory() as db:
+        result = await db.execute(select(User).where(User.whatsapp_id == wa_id))
+        user = result.scalar_one_or_none()
+
+        if user is None or user.anonymized:
+            await send_whatsapp_message(
+                wa_id, "Non risultano dati associati al suo account."
+            )
+            return
+
+        chunks = await export_user_data(db, user)
+
+    for chunk in chunks:
+        await send_whatsapp_message(wa_id, chunk)
 
 
 # ── Media download ───────────────────────────────────────────────────

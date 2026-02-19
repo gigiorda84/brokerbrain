@@ -19,6 +19,14 @@ from src.channels.whatsapp import (
 
 # ── Fixtures ─────────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def _mock_rate_limiter():
+    """Prevent real Redis calls from the rate limiter in all tests."""
+    with patch("src.channels.whatsapp.rate_limiter") as rl:
+        rl.check = AsyncMock(return_value=(True, 0))
+        yield rl
+
+
 @pytest.fixture()
 def _wa_configured():
     """Patch settings so WhatsApp appears configured."""
@@ -359,6 +367,9 @@ class TestMessageParsing:
             mock_settings.whatsapp.whatsapp_api_url = "https://graph.facebook.com/v18.0/123456"
             mock_settings.whatsapp.whatsapp_api_token = "test_token"
             mock_settings.whatsapp.whatsapp_app_secret = ""
+            mock_settings.rate_limit.upload_rate_limit = 5
+            mock_settings.rate_limit.upload_rate_window = 60
+            mock_settings.rate_limit.upload_max_size_bytes = 5_242_880
 
             mock_db = AsyncMock()
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
