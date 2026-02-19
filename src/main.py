@@ -8,11 +8,12 @@ Starts FastAPI (health check) + Telegram bot (long-polling) concurrently.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import structlog
 import uvicorn
@@ -26,6 +27,7 @@ from src.config import settings
 from src.db.engine import db_lifespan
 from src.llm.client import llm_client
 from src.security.audit import audit_on_event
+from src.security.retention import enforce_data_retention
 
 # ── Logging setup ────────────────────────────────────────────────────
 
@@ -70,7 +72,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         subscribe(audit_on_event)
         logger.info("Audit logging subscriber registered")
 
-        # 4. Admin bot + alert engine (only if token configured)
+        # 4. Data retention cron (daily at 03:00 UTC)
+        async def _retention_loop() -> None:
+            """Run retention job once per day at ~03:00 UTC."""
+            while True:
+                now = datetime.now(timezone.utc)
+                # Next 03:00 UTC
+                next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
+                if next_run <= now:
+                    next_run += timedelta(days=1)
+                wait_seconds = (next_run - now).total_seconds()
+                logger.info("Retention job scheduled in %.0f seconds", wait_seconds)
+                await asyncio.sleep(wait_seconds)
+                try:
+                    result = await enforce_data_retention()
+                    logger.info("Retention job result: %s", result)
+                except Exception:
+                    logger.exception("Retention job failed")
+
+        retention_task = asyncio.create_task(_retention_loop())
+        logger.info("Data retention scheduler started")
+
+        # 5. Admin bot + alert engine (only if token configured)
         admin_bot_instance = None
         if settings.telegram.telegram_admin_bot_token:
             from src.admin.alerts import alert_engine
@@ -123,6 +146,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if admin_bot_instance is not None:
                 await admin_bot_instance.stop()
                 logger.info("Admin bot stopped")
+
+            retention_task.cancel()
+            logger.info("Retention scheduler stopped")
 
             await llm_client.close()
             logger.info("LLM client closed")

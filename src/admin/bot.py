@@ -146,8 +146,11 @@ class AdminBot:
         self._app.add_handler(CommandHandler("gdpr", self._cmd_gdpr))
         self._app.add_handler(CommandHandler("gdpr_process", self._cmd_gdpr_process))
 
+        self._app.add_handler(CommandHandler("dossier", self._cmd_dossier))
+        self._app.add_handler(CommandHandler("intervene", self._cmd_intervene))
+
         # Stub commands (Phase 2)
-        for stub in ("search", "dossier", "week", "alerts", "intervene", "config"):
+        for stub in ("search", "week", "alerts", "config"):
             self._app.add_handler(CommandHandler(stub, self._cmd_stub))
 
         await self._app.initialize()
@@ -232,9 +235,11 @@ class AdminBot:
             "/unlive &lt;id&gt; \u2014 Smetti di seguire\n"
             "/queue \u2014 Appuntamenti in coda\n"
             "/gdpr \u2014 Panoramica GDPR e cancellazioni\n"
-            "/gdpr_process &lt;id&gt; \u2014 Esegui cancellazione\n\n"
+            "/gdpr_process &lt;id&gt; \u2014 Esegui cancellazione\n"
+            "/dossier &lt;id&gt; \u2014 Genera dossier lead\n"
+            "/intervene &lt;id&gt; \u2014 Prendi in carico sessione\n\n"
             "<b>In arrivo:</b>\n"
-            "/search, /dossier, /week, /alerts, /intervene, /config"
+            "/search, /week, /alerts, /config"
         )
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)  # type: ignore[union-attr]
 
@@ -806,6 +811,164 @@ class AdminBot:
             logger.exception("Failed to process deletion request %s", id_str)
             await update.message.reply_text(  # type: ignore[union-attr]
                 "\u274c Errore nell'elaborazione della richiesta."
+            )
+
+    @admin_only
+    async def _cmd_dossier(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/dossier <id> — build and send a lead dossier."""
+        if not context.args:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "Uso: /dossier &lt;session_id&gt;",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        session_id_str = context.args[0]
+
+        try:
+            from src.dossier.builder import (
+                build_dossier,
+                format_dossier_telegram,
+                load_session_for_dossier,
+            )
+
+            async with async_session_factory() as db:
+                # Resolve short UUID
+                if len(session_id_str) < 36:
+                    result = await db.execute(
+                        select(Session.id).where(
+                            cast(Session.id, String).like(f"{session_id_str}%")
+                        )
+                    )
+                    row = result.first()
+                    if row is None:
+                        await update.message.reply_text(  # type: ignore[union-attr]
+                            f"\u274c Sessione <code>{session_id_str}</code> non trovata.",
+                            parse_mode=ParseMode.HTML,
+                        )
+                        return
+                    full_id = str(row[0])
+                else:
+                    full_id = session_id_str
+
+                session = await load_session_for_dossier(db, full_id)
+                if session is None:
+                    await update.message.reply_text(  # type: ignore[union-attr]
+                        f"\u274c Sessione <code>{session_id_str}</code> non trovata.",
+                        parse_mode=ParseMode.HTML,
+                    )
+                    return
+
+                dossier = build_dossier(session)
+
+            text = format_dossier_telegram(dossier)
+
+            # Telegram message limit is 4096 chars — split if needed
+            if len(text) <= 4096:
+                await update.message.reply_text(text)  # type: ignore[union-attr]
+            else:
+                # Split into chunks at line boundaries
+                chunks: list[str] = []
+                current: list[str] = []
+                current_len = 0
+                for line in text.split("\n"):
+                    if current_len + len(line) + 1 > 4000:
+                        chunks.append("\n".join(current))
+                        current = []
+                        current_len = 0
+                    current.append(line)
+                    current_len += len(line) + 1
+                if current:
+                    chunks.append("\n".join(current))
+                for chunk in chunks:
+                    await update.message.reply_text(chunk)  # type: ignore[union-attr]
+
+        except Exception:
+            logger.exception("Failed to build dossier for session %s", session_id_str)
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\u274c Errore nella generazione del dossier."
+            )
+
+    @admin_only
+    async def _cmd_intervene(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/intervene <id> — take over a session (transition to HUMAN_ESCALATION)."""
+        if not context.args:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "Uso: /intervene &lt;session_id&gt;",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        session_id_str = context.args[0]
+
+        try:
+            async with async_session_factory() as db:
+                # Resolve session
+                if len(session_id_str) < 36:
+                    result = await db.execute(
+                        select(Session).where(
+                            cast(Session.id, String).like(f"{session_id_str}%")
+                        )
+                    )
+                else:
+                    result = await db.execute(
+                        select(Session).where(Session.id == uuid.UUID(session_id_str))
+                    )
+                session = result.scalars().first()
+
+                if session is None:
+                    await update.message.reply_text(  # type: ignore[union-attr]
+                        f"\u274c Sessione <code>{session_id_str}</code> non trovata.",
+                        parse_mode=ParseMode.HTML,
+                    )
+                    return
+
+                # Check if session is still active
+                from src.models.enums import ConversationState as CS
+
+                terminal_states = {CS.COMPLETED.value, CS.ABANDONED.value, CS.HUMAN_ESCALATION.value}
+                if session.current_state in terminal_states:
+                    await update.message.reply_text(  # type: ignore[union-attr]
+                        f"\u274c Sessione <code>{str(session.id)[:8]}</code> "
+                        f"gi\u00e0 terminata (stato: {session.current_state}).",
+                        parse_mode=ParseMode.HTML,
+                    )
+                    return
+
+                # Transition to HUMAN_ESCALATION
+                prev_state = session.current_state
+                session.current_state = CS.HUMAN_ESCALATION.value
+                session.outcome = "human_escalation"
+                session.outcome_reason = f"Admin intervene by {update.effective_user.id}"  # type: ignore[union-attr]
+                session.completed_at = datetime.now(UTC)
+                await db.commit()
+
+            admin_id = update.effective_user.id  # type: ignore[union-attr]
+            short_id = str(session.id)[:8]
+
+            await emit(SystemEvent(
+                event_type=EventType.SESSION_ESCALATED,
+                session_id=session.id,
+                data={
+                    "admin_id": admin_id,
+                    "previous_state": prev_state,
+                    "reason": "admin_intervene",
+                },
+                source_module="admin.bot",
+            ))
+
+            await update.message.reply_text(  # type: ignore[union-attr]
+                f"\U0001f6a8 Sessione <code>{short_id}</code> presa in carico.\n\n"
+                f"Stato precedente: {prev_state}\n"
+                f"L'utente non ricever\u00e0 pi\u00f9 risposte automatiche.\n"
+                f"Contattare l'utente direttamente per completare la qualificazione.",
+                parse_mode=ParseMode.HTML,
+            )
+
+        except Exception:
+            logger.exception("Failed to intervene on session %s", session_id_str)
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\u274c Errore nell'intervento sulla sessione."
             )
 
     @admin_only

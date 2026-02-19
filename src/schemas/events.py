@@ -79,6 +79,7 @@ class EventType(str, Enum):
     SYSTEM_SHUTDOWN = "system.shutdown"
     SYSTEM_ERROR = "system.error"
     SYSTEM_HEALTH_CHECK = "system.health_check"
+    SYSTEM_MAINTENANCE = "system.maintenance"
 
 
 class SystemEvent(BaseModel):
