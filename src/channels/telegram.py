@@ -22,9 +22,9 @@ from telegram.ext import (
 
 from src.config import settings
 from src.conversation.engine import conversation_engine
-from src.db.engine import async_session_factory
+from src.db.engine import async_session_factory, redis_client
 from src.models.deletion import DataDeletionRequest
-from src.models.enums import DeletionRequestStatus
+from src.models.enums import ConversationState, DeletionRequestStatus, SessionOutcome
 from src.models.session import Session
 from src.models.user import User
 from src.security.consent import consent_manager
@@ -90,10 +90,59 @@ async def _process_with_typing(
     await update.message.reply_text(response)
 
 
+async def _close_active_session(telegram_id: str) -> bool:
+    """Mark the user's active session as ABANDONED and clear its Redis cache.
+
+    Returns True if a session was closed, False if none was active.
+    """
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(Session)
+            .join(User, Session.user_id == User.id)
+            .where(User.telegram_id == telegram_id)
+            .where(Session.current_state.notin_([
+                ConversationState.COMPLETED.value,
+                ConversationState.ABANDONED.value,
+                ConversationState.HUMAN_ESCALATION.value,
+            ]))
+            .order_by(Session.created_at.desc())
+            .limit(1)
+        )
+        session = result.scalar_one_or_none()
+        if session is None:
+            return False
+
+        session.current_state = ConversationState.ABANDONED.value
+        session.outcome = SessionOutcome.ABANDONED.value
+        await db.commit()
+
+        # Clear Redis message cache
+        try:
+            await redis_client.delete(f"session:{session.id}:messages")
+        except Exception:
+            pass
+
+        logger.info("Closed session %s for user %s", session.id, telegram_id)
+        return True
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/start command — begin a new qualification conversation."""
+    """/start command — close any active session and begin a new one."""
     if update.effective_user is None or update.message is None:
         return
+    telegram_id = str(update.effective_user.id)
+    await _close_active_session(telegram_id)
+    await _process_with_typing(update, context, "/start", update.effective_user.first_name)
+
+
+async def nuova_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/nuova command — end current session and start fresh."""
+    if update.effective_user is None or update.message is None:
+        return
+    telegram_id = str(update.effective_user.id)
+    closed = await _close_active_session(telegram_id)
+    if closed:
+        await update.message.reply_text("Sessione precedente chiusa. Iniziamo da capo!")
     await _process_with_typing(update, context, "/start", update.effective_user.first_name)
 
 
@@ -191,6 +240,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Sono l'assistente di ameconviene.it.\n\n"
         "Comandi disponibili:\n"
         "/start — Inizia una nuova conversazione\n"
+        "/nuova — Chiudi sessione attuale e ricomincia\n"
         "/aiuto — Mostra questo messaggio\n"
         "/operatore — Parla con un consulente\n"
         "/elimina_dati — Richiedi cancellazione dati\n"
@@ -337,6 +387,7 @@ def create_telegram_app() -> Application:
 
     # Register handlers
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("nuova", nuova_command))
     app.add_handler(CommandHandler("aiuto", help_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("operatore", operator_command))
