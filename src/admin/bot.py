@@ -119,7 +119,7 @@ class AdminBot:
     """Telegram admin bot for monitoring and system visibility."""
 
     def __init__(self) -> None:
-        self._app: Application | None = None
+        self._app: Application | None = None  # type: ignore[type-arg]
         self._live_subs: dict[uuid.UUID, set[int]] = defaultdict(set)
 
     async def start(self) -> None:
@@ -267,7 +267,7 @@ class AdminBot:
         # Redis
         try:
             t0 = time.monotonic()
-            await redis_client.ping()
+            await redis_client.ping()  # type: ignore[misc]
             ms = int((time.monotonic() - t0) * 1000)
             parts.append(f"\u2705 Redis: OK ({ms}ms)")
         except Exception as exc:
@@ -389,8 +389,7 @@ class AdminBot:
         # Calculations
         if session.dti_calculations:
             latest_dti = session.dti_calculations[-1]
-            data = latest_dti.input_data or {}
-            lines.append(f"\n<b>DTI:</b> {data.get('dti_ratio', '?')}")
+            lines.append(f"\n<b>DTI:</b> {latest_dti.current_dti}")
         if session.cdq_calculations:
             lines.append(f"<b>CdQ calcoli:</b> {len(session.cdq_calculations)}")
 

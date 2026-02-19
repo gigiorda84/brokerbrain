@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import DateTime, Float, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -34,8 +34,8 @@ class Document(TimestampMixin, Base):
     file_size_bytes: Mapped[int | None] = mapped_column()
 
     # OCR results
-    ocr_result: Mapped[dict | None] = mapped_column(JSONB, comment="Full OCR extraction output")
-    confidence_scores: Mapped[dict | None] = mapped_column(
+    ocr_result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, comment="Full OCR extraction output")
+    confidence_scores: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, comment="Per-field confidence scores from OCR"
     )
     overall_confidence: Mapped[float | None] = mapped_column(Float)

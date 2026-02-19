@@ -112,7 +112,7 @@ class ErasureProcessor:
                 del_result = await db.execute(
                     delete(ExtractedData).where(ExtractedData.session_id.in_(session_ids))
                 )
-                result.extracted_data = del_result.rowcount  # type: ignore[assignment]
+                result.extracted_data = del_result.rowcount  # type: ignore[attr-defined]
 
                 # 3b. Delete documents (unlink files if they exist)
                 docs_result = await db.execute(
@@ -132,36 +132,36 @@ class ErasureProcessor:
                 del_result = await db.execute(
                     delete(Document).where(Document.session_id.in_(session_ids))
                 )
-                result.documents = del_result.rowcount  # type: ignore[assignment]
+                result.documents = del_result.rowcount  # type: ignore[attr-defined]
 
                 # 3c. Delete liabilities
                 del_result = await db.execute(
                     delete(Liability).where(Liability.session_id.in_(session_ids))
                 )
-                result.liabilities = del_result.rowcount  # type: ignore[assignment]
+                result.liabilities = del_result.rowcount  # type: ignore[attr-defined]
 
                 # 3d. Delete calculations
                 del_result = await db.execute(
                     delete(DTICalculation).where(DTICalculation.session_id.in_(session_ids))
                 )
-                result.dti_calculations = del_result.rowcount  # type: ignore[assignment]
+                result.dti_calculations = del_result.rowcount  # type: ignore[attr-defined]
 
                 del_result = await db.execute(
                     delete(CdQCalculation).where(CdQCalculation.session_id.in_(session_ids))
                 )
-                result.cdq_calculations = del_result.rowcount  # type: ignore[assignment]
+                result.cdq_calculations = del_result.rowcount  # type: ignore[attr-defined]
 
                 # 3e. Delete product matches
                 del_result = await db.execute(
                     delete(ProductMatch).where(ProductMatch.session_id.in_(session_ids))
                 )
-                result.product_matches = del_result.rowcount  # type: ignore[assignment]
+                result.product_matches = del_result.rowcount  # type: ignore[attr-defined]
 
                 # 3f. Delete quotation data
                 del_result = await db.execute(
                     delete(QuotationData).where(QuotationData.session_id.in_(session_ids))
                 )
-                result.quotation_data = del_result.rowcount  # type: ignore[assignment]
+                result.quotation_data = del_result.rowcount  # type: ignore[attr-defined]
 
                 # 3g. Cancel pending/confirmed appointments
                 upd_result = await db.execute(
@@ -175,7 +175,7 @@ class ErasureProcessor:
                     )
                     .values(status=AppointmentStatus.CANCELLED.value)
                 )
-                result.appointments_cancelled = upd_result.rowcount  # type: ignore[assignment]
+                result.appointments_cancelled = upd_result.rowcount  # type: ignore[attr-defined]
 
                 # 3h. Redact messages
                 upd_result = await db.execute(
@@ -183,7 +183,7 @@ class ErasureProcessor:
                     .where(Message.session_id.in_(session_ids))
                     .values(content="[REDATTO]", media_url=None)
                 )
-                result.messages = upd_result.rowcount  # type: ignore[assignment]
+                result.messages = upd_result.rowcount  # type: ignore[attr-defined]
 
                 # 3i. Clear session classification fields
                 await db.execute(

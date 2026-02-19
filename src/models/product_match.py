@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Boolean, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -31,8 +31,8 @@ class ProductMatch(TimestampMixin, Base):
     eligible: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
     # Rule details
-    conditions: Mapped[dict | None] = mapped_column(JSONB, comment="Conditions met/unmet for this product")
-    estimated_terms: Mapped[dict | None] = mapped_column(JSONB, comment="Estimated rates, amounts, durations")
+    conditions: Mapped[dict[str, Any] | None] = mapped_column(JSONB, comment="Conditions met/unmet for this product")
+    estimated_terms: Mapped[dict[str, Any] | None] = mapped_column(JSONB, comment="Estimated rates, amounts, durations")
 
     # Ranking
     rank: Mapped[int | None] = mapped_column(Integer, comment="Display order, lower is better")

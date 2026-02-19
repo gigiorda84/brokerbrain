@@ -161,7 +161,7 @@ async def get_sessions_paginated(
     )
     sessions = list(result.scalars().all())
 
-    return sessions, total
+    return sessions, total  # type: ignore[return-value]
 
 
 async def get_session_full(db: AsyncSession, session_id: uuid.UUID) -> Session | None:
@@ -244,7 +244,7 @@ async def get_audit_log_paginated(
     )
     logs = list(result.scalars().all())
 
-    return logs, total
+    return logs, total  # type: ignore[return-value]
 
 
 async def get_gdpr_overview(db: AsyncSession) -> dict[str, Any]:
@@ -373,7 +373,7 @@ async def check_system_health() -> dict[str, Any]:
     # Redis
     try:
         t0 = time.monotonic()
-        await redis_client.ping()
+        await redis_client.ping()  # type: ignore[misc]
         ms = int((time.monotonic() - t0) * 1000)
         health["redis"] = {"status": "ok", "latency_ms": ms}
     except Exception as exc:

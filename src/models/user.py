@@ -6,7 +6,7 @@ record for audit purposes but wipes all PII).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Boolean, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -39,7 +39,7 @@ class User(TimestampMixin, Base):
     codice_fiscale_encrypted: Mapped[str | None] = mapped_column(Text, comment="AES-256-GCM encrypted")
 
     # Consent status (JSONB for flexibility: {"privacy": true, "marketing": false, ...})
-    consent_status: Mapped[dict | None] = mapped_column(JSONB, default=dict)
+    consent_status: Mapped[dict[str, Any] | None] = mapped_column(JSONB, default=dict)
 
     # GDPR soft delete
     anonymized: Mapped[bool] = mapped_column(Boolean, default=False, index=True)

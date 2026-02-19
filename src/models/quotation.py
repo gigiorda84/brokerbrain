@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import ForeignKey, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -29,7 +29,7 @@ class QuotationData(TimestampMixin, Base):
     form_type: Mapped[str] = mapped_column(String(20), nullable=False)
 
     # Form fields as JSONB — structure varies by form_type
-    form_fields: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    form_fields: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
     # Relationships
     session: Mapped[Session] = relationship("Session", back_populates="quotation_data")
