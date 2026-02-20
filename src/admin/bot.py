@@ -1,7 +1,9 @@
 """Telegram admin bot — monitoring, live session tracking, and system health.
 
-Provides 9 core commands for real-time system visibility:
-/help, /health, /active, /session, /today, /stats, /errors, /live, /unlive
+Full command set:
+  /help, /health, /active, /session, /today, /stats, /errors
+  /live, /unlive, /queue, /gdpr, /gdpr_process, /dossier, /intervene
+  /search, /week, /alerts, /config
 
 Uses python-telegram-bot v21+ async. All commands are restricted to admins
 listed in ADMIN_TELEGRAM_IDS.
@@ -19,18 +21,21 @@ from functools import wraps
 from typing import Any
 
 import httpx
-from sqlalchemy import String, func, select, text
+from sqlalchemy import String, func, or_, select, text
 from sqlalchemy.sql.expression import cast
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+from src.admin.alerts import ALERT_RULES
 from src.admin.events import subscribe, unsubscribe
 from src.admin.queries import get_gdpr_overview, resolve_deletion_request
 from src.config import settings
 from src.db.engine import async_session_factory, redis_client
 from src.models.audit import AuditLog
+from src.models.product_match import ProductMatch
 from src.models.session import Session
+from src.models.user import User
 from src.schemas.events import EventType, SystemEvent
 from src.security.erasure import erasure_processor
 
@@ -149,9 +154,10 @@ class AdminBot:
         self._app.add_handler(CommandHandler("dossier", self._cmd_dossier))
         self._app.add_handler(CommandHandler("intervene", self._cmd_intervene))
 
-        # Stub commands (Phase 2)
-        for stub in ("search", "week", "alerts", "config"):
-            self._app.add_handler(CommandHandler(stub, self._cmd_stub))
+        self._app.add_handler(CommandHandler("search", self._cmd_search))
+        self._app.add_handler(CommandHandler("week", self._cmd_week))
+        self._app.add_handler(CommandHandler("alerts", self._cmd_alerts))
+        self._app.add_handler(CommandHandler("config", self._cmd_config))
 
         await self._app.initialize()
         await self._app.start()
@@ -237,9 +243,11 @@ class AdminBot:
             "/gdpr \u2014 Panoramica GDPR e cancellazioni\n"
             "/gdpr_process &lt;id&gt; \u2014 Esegui cancellazione\n"
             "/dossier &lt;id&gt; \u2014 Genera dossier lead\n"
-            "/intervene &lt;id&gt; \u2014 Prendi in carico sessione\n\n"
-            "<b>In arrivo:</b>\n"
-            "/search, /week, /alerts, /config"
+            "/intervene &lt;id&gt; \u2014 Prendi in carico sessione\n"
+            "/search &lt;nome|CF&gt; \u2014 Cerca sessioni per nome o CF\n"
+            "/week \u2014 Riepilogo settimanale\n"
+            "/alerts \u2014 Alert attivi (ultime 48h)\n"
+            "/config \u2014 Configurazione sistema e regole alert"
         )
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)  # type: ignore[union-attr]
 
@@ -970,6 +978,295 @@ class AdminBot:
             await update.message.reply_text(  # type: ignore[union-attr]
                 "\u274c Errore nell'intervento sulla sessione."
             )
+
+    @admin_only
+    async def _cmd_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/search <name|CF> — find sessions by user name or codice fiscale."""
+        if not context.args:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\U0001f50d Uso: /search <nome> oppure /search <codice_fiscale>"
+            )
+            return
+
+        query_str = " ".join(context.args).strip()
+
+        try:
+            async with async_session_factory() as db:
+                from sqlalchemy.orm import selectinload
+
+                # Detect CF pattern: exactly 16 alphanumeric chars (no spaces)
+                is_cf = len(query_str) == 16 and query_str.replace(" ", "").isalnum()
+
+                if is_cf:
+                    # CF is encrypted with random nonces — can't use SQL equality.
+                    # Load users with encrypted CF and decrypt in Python (capped at 200).
+                    from src.security.encryption import field_encryptor
+
+                    target_cf = query_str.upper()
+                    result = await db.execute(
+                        select(User)
+                        .where(User.codice_fiscale_encrypted.isnot(None), User.anonymized.is_(False))
+                        .options(selectinload(User.sessions))
+                        .limit(200)
+                    )
+                    all_users = list(result.scalars().all())
+                    matching_users = []
+                    for u in all_users:
+                        try:
+                            if (
+                                u.codice_fiscale_encrypted
+                                and field_encryptor.decrypt(u.codice_fiscale_encrypted) == target_cf
+                            ):
+                                matching_users.append(u)
+                        except Exception:
+                            pass  # Decryption failure = wrong key or corrupt data, skip
+                else:
+                    # Name search: ILIKE on each word against first_name and last_name
+                    parts = query_str.split()
+                    conditions = []
+                    for part in parts:
+                        conditions.append(User.first_name.ilike(f"%{part}%"))
+                        conditions.append(User.last_name.ilike(f"%{part}%"))
+
+                    result = await db.execute(
+                        select(User)
+                        .where(or_(*conditions), User.anonymized.is_(False))
+                        .options(selectinload(User.sessions))
+                        .limit(10)
+                    )
+                    matching_users = list(result.scalars().all())
+        except Exception:
+            logger.exception("Failed to search sessions for %r", query_str)
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\u274c Errore nella ricerca."
+            )
+            return
+
+        if not matching_users:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                f"\U0001f50d Nessun risultato per \u00ab{query_str}\u00bb."
+            )
+            return
+
+        lines = [f"\U0001f50d <b>Risultati per \u00ab{query_str}\u00bb</b>\n"]
+        for user in matching_users[:5]:
+            name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "(anonimo)"
+            # Show up to 3 most recent sessions per user
+            recent = sorted(user.sessions, key=lambda s: s.started_at, reverse=True)[:3]
+            for session in recent:
+                short_id = str(session.id)[:8]
+                ts = session.started_at.strftime("%d/%m %H:%M")
+                outcome = session.outcome or session.current_state
+                lines.append(f"\u2022 <b>{name}</b> \u2014 <code>{short_id}</code> \u2014 {ts} \u2014 {outcome}")
+
+        await update.message.reply_text(  # type: ignore[union-attr]
+            "\n".join(lines), parse_mode=ParseMode.HTML
+        )
+
+    @admin_only
+    async def _cmd_week(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/week — weekly summary with breakdown by employment type and product."""
+        week_start = datetime.now(UTC) - timedelta(days=7)
+
+        try:
+            async with async_session_factory() as db:
+                # Totals for the week
+                result = await db.execute(
+                    select(func.count(Session.id)).where(Session.started_at >= week_start)
+                )
+                total = result.scalar() or 0
+
+                result = await db.execute(
+                    select(func.count(Session.id)).where(
+                        Session.started_at >= week_start,
+                        Session.outcome.isnot(None),
+                    )
+                )
+                completed = result.scalar() or 0
+
+                result = await db.execute(
+                    select(func.count(Session.id)).where(
+                        Session.started_at >= week_start,
+                        Session.outcome == "qualified",
+                    )
+                )
+                qualified = result.scalar() or 0
+
+                result = await db.execute(
+                    select(func.count(Session.id)).where(
+                        Session.started_at >= week_start,
+                        Session.outcome == "abandoned",
+                    )
+                )
+                abandoned = result.scalar() or 0
+
+                # Breakdown by employment type
+                result = await db.execute(
+                    select(Session.employment_type, func.count(Session.id))
+                    .where(Session.started_at >= week_start, Session.employment_type.isnot(None))
+                    .group_by(Session.employment_type)
+                    .order_by(func.count(Session.id).desc())
+                )
+                emp_types = result.all()
+
+                # Eligible products matched this week
+                result = await db.execute(
+                    select(ProductMatch.product_name, func.count(ProductMatch.id))
+                    .join(Session, ProductMatch.session_id == Session.id)
+                    .where(Session.started_at >= week_start, ProductMatch.eligible.is_(True))
+                    .group_by(ProductMatch.product_name)
+                    .order_by(func.count(ProductMatch.id).desc())
+                )
+                products = result.all()
+        except Exception:
+            logger.exception("Failed to query weekly stats")
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\u274c Errore nel recupero del riepilogo settimanale."
+            )
+            return
+
+        qual_rate = f"{qualified / completed:.0%}" if completed > 0 else "N/A"
+        period_label = f"({week_start.strftime('%d/%m')} \u2013 oggi)"
+
+        lines = [
+            f"\U0001f4c6 <b>Riepilogo settimana</b> {period_label}\n",
+            f"<b>Sessioni avviate:</b> {total}",
+            f"<b>Completate:</b> {completed}",
+            f"<b>Abbandonate:</b> {abandoned}",
+            f"<b>Qualificate:</b> {qualified}",
+            f"<b>Tasso qualificazione:</b> {qual_rate}",
+        ]
+
+        if emp_types:
+            lines.append("\n<b>Per tipo impiego:</b>")
+            for emp, count in emp_types:
+                lines.append(f"  {emp}: {count}")
+
+        if products:
+            lines.append("\n<b>Prodotti idonei:</b>")
+            for prod, count in products:
+                lines.append(f"  {prod}: {count}")
+
+        await update.message.reply_text(  # type: ignore[union-attr]
+            "\n".join(lines), parse_mode=ParseMode.HTML
+        )
+
+    @admin_only
+    async def _cmd_alerts(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/alerts — active alerts from the last 48h (warning/critical only)."""
+        since = datetime.now(UTC) - timedelta(hours=48)
+
+        # Event types that can trigger alert rules (from alerts.py ALERT_RULES)
+        alert_event_types = [
+            "ocr.failed",
+            "ocr.completed",
+            "llm.error",
+            "session.escalated",
+            "system.error",
+            "gdpr.deletion_requested",
+            "calculation.dti",
+            "document.classified",
+        ]
+
+        try:
+            async with async_session_factory() as db:
+                result = await db.execute(
+                    select(AuditLog)
+                    .where(
+                        AuditLog.created_at >= since,
+                        AuditLog.event_type.in_(alert_event_types),
+                    )
+                    .order_by(AuditLog.created_at.desc())
+                    .limit(30)
+                )
+                events = list(result.scalars().all())
+        except Exception:
+            logger.exception("Failed to query alerts")
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\u274c Errore nel recupero degli alert."
+            )
+            return
+
+        # Apply the same conditions as AlertEngine to filter to real alert triggers
+        active: list[tuple[str, AuditLog, str]] = []
+        for ev in events:
+            data = ev.data or {}
+            match ev.event_type:
+                case "ocr.failed":
+                    active.append(("\U0001f534", ev, f"OCR fallito: {str(data.get('error', '?'))[:60]}"))
+                case "ocr.completed" if data.get("overall_confidence", 1.0) < 0.70:
+                    conf = data.get("overall_confidence", 0)
+                    active.append(("\u26a0\ufe0f", ev, f"OCR bassa confidenza ({conf:.0%}): {data.get('doc_type', '?')}"))
+                case "llm.error":
+                    active.append(("\u23f1", ev, f"LLM errore: {str(data.get('error', '?'))[:60]}"))
+                case "session.escalated":
+                    active.append(("\U0001f6a8", ev, "Escalation umana richiesta"))
+                case "system.error":
+                    active.append(("\U0001f4a5", ev, f"Errore di sistema: {str(data.get('error', '?'))[:60]}"))
+                case "gdpr.deletion_requested":
+                    active.append(("\U0001f5d1", ev, "Richiesta eliminazione dati (GDPR)"))
+                case "calculation.dti" if data.get("current_dti", 0) > 0.40:
+                    dti = data.get("current_dti", 0)
+                    active.append(("\u26a0\ufe0f", ev, f"DTI alto: {dti:.0%}"))
+                case "document.classified" if data.get("overall_confidence", 1.0) < 0.80:
+                    conf = data.get("overall_confidence", 0)
+                    active.append(("\u26a0\ufe0f", ev, f"Documento bassa confidenza ({conf:.0%}): {data.get('doc_type', '?')}"))
+
+        if not active:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\u2705 Nessun alert attivo nelle ultime 48h."
+            )
+            return
+
+        lines = [f"\U0001f514 <b>Alert attivi ({len(active)})</b> \u2014 ultime 48h\n"]
+        for icon, ev, desc in active:
+            ts = ev.created_at.strftime("%d/%m %H:%M") if ev.created_at else "?"
+            short_id = str(ev.session_id)[:8] if ev.session_id else "\u2014"
+            lines.append(f"{icon} <code>{ts}</code> | {desc}\n   Sessione: <code>{short_id}</code>")
+
+        await update.message.reply_text(  # type: ignore[union-attr]
+            "\n".join(lines), parse_mode=ParseMode.HTML
+        )
+
+    @admin_only
+    async def _cmd_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/config — view current system configuration and active alert rules."""
+        llm = settings.llm
+        rate = settings.rate_limit
+
+        lines = [
+            "\u2699\ufe0f <b>Configurazione sistema</b>\n",
+            "<b>LLM</b>",
+            f"  Provider: {llm.llm_provider}",
+            f"  Modello conversazione: <code>{llm.conversation_model}</code>",
+            f"  Modello vision/OCR: <code>{llm.vision_model}</code>",
+            f"  Timeout conversazione: {llm.conversation_timeout}s",
+            f"  Timeout OCR: {llm.ocr_timeout}s",
+            f"  Max token risposta: {llm.conversation_max_tokens}",
+            "",
+            "<b>Rate limit</b>",
+            f"  Messaggi: {rate.message_rate_limit} / {rate.message_rate_window}s",
+            f"  Upload: {rate.upload_rate_limit} / {rate.upload_rate_window}s",
+            f"  Dimensione max file: {rate.upload_max_size_bytes // 1_048_576} MB",
+            "",
+            "<b>Soglie alert</b>",
+            "  OCR bassa confidenza: \u003c 70%",
+            "  Documento bassa confidenza: \u003c 80%",
+            "  DTI alto: \u003e 40%",
+            f"\n<b>Regole alert attive ({len(ALERT_RULES)})</b>",
+        ]
+
+        level_icons = {"critical": "\U0001f534", "warning": "\u26a0\ufe0f", "info": "\u2139\ufe0f"}
+        for rule in ALERT_RULES:
+            icon = level_icons.get(rule.level, "\u2139\ufe0f")
+            lines.append(f"  {icon} {rule.name}")
+
+        lines.append(f"\n<b>Admin autorizzati:</b> {len(settings.telegram.admin_ids)}")
+        lines.append(f"<b>Ambiente:</b> {settings.environment}")
+
+        await update.message.reply_text(  # type: ignore[union-attr]
+            "\n".join(lines), parse_mode=ParseMode.HTML
+        )
 
     @admin_only
     async def _cmd_stub(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
