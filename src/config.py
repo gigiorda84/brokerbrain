@@ -156,6 +156,20 @@ class SecuritySettings(BaseSettings):
     admin_web_password: str = Field(default="", description="HTTP Basic Auth password for admin (Phase 1)")
 
 
+class PivaSettings(BaseSettings):
+    """Agenzia delle Entrate P.IVA validation API settings."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    piva_ade_api_key: str = Field(default="", description="AdE API Management subscription key")
+    piva_ade_api_url: str = Field(
+        default="https://api.agenziaentrate.gov.it/entrate/api/partita-iva/v0/verifica",
+        description="Agenzia delle Entrate P.IVA validation endpoint",
+    )
+    piva_cache_ttl: int = Field(default=86400, description="Redis cache TTL in seconds (24h)")
+    piva_validation_enabled: bool = Field(default=True, description="Enable AdE validation")
+
+
 class BrandingSettings(BaseSettings):
     """Branding and legal identity constants."""
 
@@ -195,6 +209,7 @@ class Settings(BaseSettings):
     rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     branding: BrandingSettings = Field(default_factory=BrandingSettings)
+    piva: PivaSettings = Field(default_factory=PivaSettings)
 
     @field_validator("log_level")
     @classmethod

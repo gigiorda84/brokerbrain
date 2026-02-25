@@ -96,13 +96,16 @@ class TestPensionatoPath:
 
 
 class TestPartitaIvaPath:
-    """P.IVA skips employer/pension class → goes straight to HOUSEHOLD."""
+    """P.IVA → PIVA_COLLECTION → HOUSEHOLD (P.IVA number + income collected first)."""
 
     @pytest.mark.asyncio
     async def test_partita_iva_path(self, make_fsm):
         fsm = make_fsm(ConversationState.EMPLOYMENT_TYPE)
 
         await fsm.transition("partita_iva")
+        assert fsm.current_state == ConversationState.PIVA_COLLECTION
+
+        await fsm.transition("complete")
         assert fsm.current_state == ConversationState.HOUSEHOLD
 
 

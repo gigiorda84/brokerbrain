@@ -110,6 +110,7 @@ class ConversationState(str, Enum):
     EMPLOYMENT_TYPE = "employment_type"
     EMPLOYER_CLASS = "employer_class"
     PENSION_CLASS = "pension_class"
+    PIVA_COLLECTION = "piva_collection"
     TRACK_CHOICE = "track_choice"
     DOC_REQUEST = "doc_request"
     DOC_UPLOAD = "doc_upload"

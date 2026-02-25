@@ -31,11 +31,13 @@ from src.conversation.prompts.liabilities import LIABILITIES_PROMPT
 from src.conversation.prompts.manual_collection import MANUAL_COLLECTION_PROMPT
 from src.conversation.prompts.needs_assessment import NEEDS_ASSESSMENT_PROMPT
 from src.conversation.prompts.pension_class import PENSION_CLASS_PROMPT
+from src.conversation.prompts.piva_collection import PIVA_COLLECTION_PROMPT
 from src.conversation.prompts.track_choice import TRACK_CHOICE_PROMPT
 from src.conversation.prompts.welcome import WELCOME_PROMPT
 from src.db.engine import redis_client as _redis
 from src.decoders.codice_fiscale import decode_cf
 from src.eligibility.engine import match_products
+from src.integrations.piva.service import validate_piva
 from src.llm.client import llm_client
 from src.models.calculation import CdQCalculation, DTICalculation
 from src.models.enums import ConversationState, DataSource, LiabilityType, MessageRole, SessionOutcome
@@ -65,6 +67,7 @@ STATE_PROMPTS: dict[ConversationState, str] = {
     ConversationState.TRACK_CHOICE: TRACK_CHOICE_PROMPT,
     ConversationState.DOC_REQUEST: DOC_REQUEST_PROMPT,
     ConversationState.MANUAL_COLLECTION: MANUAL_COLLECTION_PROMPT,
+    ConversationState.PIVA_COLLECTION: PIVA_COLLECTION_PROMPT,
     ConversationState.HOUSEHOLD: HOUSEHOLD_PROMPT,
     ConversationState.LIABILITIES: LIABILITIES_PROMPT,
 }
@@ -772,6 +775,16 @@ class ConversationEngine:
 
             # Persist other extracted data
             await _persist_extracted_data(db, session, data)
+
+            # If piva_number just collected in PIVA_COLLECTION state, validate via AdE
+            if "piva_number" in data and current_state == ConversationState.PIVA_COLLECTION:
+                piva_result = await validate_piva(data["piva_number"], _redis)
+                api_data: dict[str, str] = {
+                    "piva_validation_status": "valid" if piva_result.valid else "invalid",
+                }
+                if piva_result.denomination:
+                    api_data["company_denomination"] = piva_result.denomination
+                await _persist_extracted_data(db, session, api_data, source=DataSource.API.value)
 
             logger.info("Collected data: %s (session=%s)", list(data.keys()), session.id)
 
