@@ -23,10 +23,13 @@ TRANSITIONS: dict[ConversationState, dict[str, ConversationState]] = {
     },
     ConversationState.EMPLOYMENT_TYPE: {
         "dipendente": ConversationState.EMPLOYER_CLASS,
-        "partita_iva": ConversationState.HOUSEHOLD,
+        "partita_iva": ConversationState.PIVA_COLLECTION,
         "pensionato": ConversationState.PENSION_CLASS,
         "disoccupato": ConversationState.HUMAN_ESCALATION,
         "mixed": ConversationState.HUMAN_ESCALATION,
+    },
+    ConversationState.PIVA_COLLECTION: {
+        "complete": ConversationState.HOUSEHOLD,
     },
     ConversationState.EMPLOYER_CLASS: {
         "classified": ConversationState.TRACK_CHOICE,

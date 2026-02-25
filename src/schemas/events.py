@@ -74,6 +74,10 @@ class EventType(str, Enum):
     ADMIN_OVERRIDE = "admin.override"
     ADMIN_ALERT = "admin.alert"
 
+    # External API
+    EXTERNAL_API_CALL = "external_api.call"
+    EXTERNAL_API_RESPONSE = "external_api.response"
+
     # System
     SYSTEM_STARTUP = "system.startup"
     SYSTEM_SHUTDOWN = "system.shutdown"
